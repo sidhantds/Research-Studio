@@ -2,23 +2,8 @@ import wikipedia
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
 from langchain_core.tools import Tool
-from datetime import datetime
 import time
 import re
-
-def save_to_txt(data: str, filename: str = "Research_output.txt"):
-      timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-      formatted_text = f"-- Research Output---\nTimestamp:{timestamp}\n\n{data}\n\n"\
-
-      with open(filename, "a", encoding="utf-8") as f:
-            f.write(formatted_text)
-      return f"Data sucessfully saved to {filename}"
-
-save_tool= Tool(
-      name="save_text_to_file",
-      func= save_to_txt,
-      description="seach the web for information",
-)
 
 # Cache of successful lookups by normalized query, shared across sessions (public data only).
 # Repeat questions and follow-ups reuse results instead of searching again. Failures aren't cached.
@@ -40,15 +25,14 @@ def _cached(kind: str, query: str, fetch) -> str:
     return _CACHE[key]
 
 
-# Engines tried one at a time, fastest and most reliable first. Each gets a short timeout and
-# the whole search a total budget, so one engine timing out doesn't sink the lookup.
-# (Bing is left out: it ignores the timeout and can hang for ~25s.)
-_ENGINES = ["yahoo", "duckduckgo", "mojeek", "brave", "google"]
+# A primary engine and one fallback, each with a short timeout, inside a total budget, so one
+# engine timing out doesn't sink the lookup. If both fail, Wikipedia usually still works.
+_ENGINES = ["yahoo", "duckduckgo"]
 _ENGINE_TIMEOUT = 8
-_SEARCH_BUDGET_SECONDS = 25
+_SEARCH_BUDGET_SECONDS = 20
 
 
-def _fetch_web(query: str, timelimit: str | None = None) -> str:
+def _fetch_web(query: str) -> str:
     from ddgs import DDGS
 
     started, errors = time.monotonic(), []
@@ -56,8 +40,7 @@ def _fetch_web(query: str, timelimit: str | None = None) -> str:
         if time.monotonic() - started > _SEARCH_BUDGET_SECONDS:
             break
         try:
-            results = DDGS(timeout=_ENGINE_TIMEOUT).text(query, backend=engine, max_results=6 if timelimit else 4,
-                                                         timelimit=timelimit)
+            results = DDGS(timeout=_ENGINE_TIMEOUT).text(query, backend=engine, max_results=4)
         except Exception as e:
             errors.append(f"{engine}: {type(e).__name__}")
             continue
@@ -124,11 +107,8 @@ wiki_tool = Tool(
     description=_wiki.description,
 )
 
-# ---------- Source rules (allowlist, denylist, recency) ----------
+# ---------- Source rules (allowlist, denylist) ----------
 # Enforced here, in code, on every result, so a rule can't be ignored by the model.
-
-RECENCY = {"Any time": None, "Past year": "y", "Past month": "m", "Past week": "w"}
-
 
 def parse_domains(text: str) -> list[str]:
     """'nasa.gov, .edu  arxiv.org' -> ['nasa.gov', 'edu', 'arxiv.org']"""
@@ -165,10 +145,9 @@ def _filter_blocks(text: str, allow: list[str], deny: list[str]) -> tuple[str, i
     return "\n\n".join(kept), dropped
 
 
-def make_search_tool(allow: list[str], deny: list[str], recency: str = "Any time") -> Tool:
-    """Web search that only returns results from allowed domains (and within the recency window)."""
-    timelimit = RECENCY.get(recency)
-    if not allow and not deny and not timelimit:
+def make_search_tool(allow: list[str], deny: list[str]) -> Tool:
+    """Web search that only returns results from allowed domains."""
+    if not allow and not deny:
         return search_tool
 
     def search(query: str) -> str:
@@ -176,7 +155,7 @@ def make_search_tool(allow: list[str], deny: list[str], recency: str = "Any time
         if allow and len(allow) <= 3:  # steer the engine too; the filter below is what enforces it
             q += " " + " OR ".join(f"site:{d}" for d in allow)
         try:
-            text = _cached(f"web:{timelimit}", q, lambda x: _fetch_web(x, timelimit))
+            text = _cached("web", q, _fetch_web)
         except Exception as e:
             return f"Web search failed ({type(e).__name__}). Try a different query. Don't fill gaps from memory."
         kept, dropped = _filter_blocks(text, allow, deny)
@@ -188,8 +167,7 @@ def make_search_tool(allow: list[str], deny: list[str], recency: str = "Any time
 
     return Tool(name=search_tool.name, func=search,
                 description=search_tool.description
-                + (f" Only results from: {', '.join(allow)}." if allow else "")
-                + (f" Limited to the {recency.lower()}." if timelimit else ""))
+                + (f" Only results from: {', '.join(allow)}." if allow else ""))
 
 
 def make_wiki_tool(allow: list[str], deny: list[str]) -> Tool | None:

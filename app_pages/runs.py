@@ -19,15 +19,13 @@ def pct(values: list[bool]) -> str:
 
 tokens_in = sum(r["tokens_in"] for r in runs)
 tokens_out = sum(r["tokens_out"] for r in runs)
-cost = s.estimate_cost(tokens_in, tokens_out)
 followups = [r for r in runs if r["kind"] != "New research"]
 
 with st.container(horizontal=True):
     st.metric("Runs", len(runs), border=True)
     st.metric("Succeeded", pct([r["status"] != "Failed" for r in runs]), border=True)
     st.metric("Avg time", f"{sum(r['seconds'] for r in runs) / len(runs):.0f}s", border=True)
-    st.metric("Est. cost", f"${cost:.4f}" if cost is not None else "–", border=True,
-              help="Set prices in Settings to estimate cost.")
+    st.metric("Tokens", f"{tokens_in + tokens_out:,}", border=True)
 
 st.subheader("Quality checks")
 grounded = [r["checks"]["grounded"] for r in runs if r["checks"].get("grounded")]

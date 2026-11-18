@@ -106,22 +106,12 @@ with st.sidebar:
         st.text_input("Only use these domains", key="rule_allow", placeholder="e.g. nasa.gov, .edu, arxiv.org",
                       help="Leave empty to allow any site. 'gov' matches every .gov site.")
         st.text_input("Never use these domains", key="rule_deny", placeholder="e.g. reddit.com, quora.com")
-        st.segmented_control("Recency", list(tools.RECENCY), default="Any time", required=True, key="rule_recency",
-                             help="Asks the search engines to filter by date. Wikipedia isn't date-filtered.")
         st.divider()
         usage = st.session_state.usage
-        cost = s.estimate_cost(usage["input"], usage["output"])
         n_runs = len(st.session_state.runs)
         st.caption(f"This session: {n_runs} run{'s' if n_runs != 1 else ''} · "
-                   f"{usage['input'] + usage['output']:,} tokens"
-                   + (f" · ~${cost:.4f}" if cost is not None else ""))
+                   f"{usage['input'] + usage['output']:,} tokens")
         st.page_link(runs, label="Runs & quality", icon=":material/monitoring:")
-        with st.expander("Cost estimate"):
-            st.caption("Prices per million tokens, from your provider's pricing page.")
-            st.number_input("Input price (USD per 1M tokens)", min_value=0.0, step=0.01, format="%.3f",
-                            value=float(os.getenv("PRICE_INPUT_PER_M", 0) or 0), key="price_in")
-            st.number_input("Output price (USD per 1M tokens)", min_value=0.0, step=0.01, format="%.3f",
-                            value=float(os.getenv("PRICE_OUTPUT_PER_M", 0) or 0), key="price_out")
         st.caption(f"Model: `{MODEL_NAME}` · "
                    + (":green[connected]" if s.has_api_key() else ":red[no API key]"))
         st.caption("Reports, uploads and saved files stay in your browser session.")

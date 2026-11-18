@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
-from tools import search_tool, wiki_tool, save_tool
+from tools import search_tool, wiki_tool
 
 load_dotenv()
 
@@ -254,7 +254,9 @@ prompt = ChatPromptTemplate.from_messages(
     ]
 ).partial(format_instructions=parser.get_format_instructions(), envelope_rules=ENVELOPE_RULES)
 
-TOOLS = [search_tool, wiki_tool, save_tool]
+# The CLI's default tools. Read-only on purpose: the app adds a save tool that only *requests*
+# a write, which the user must approve. Nothing here can write to disk.
+TOOLS = [search_tool, wiki_tool]
 
 
 class TokenCounter(BaseCallbackHandler):
@@ -350,33 +352,6 @@ def research_further_instructions(pack: str, question: str, response_type: str, 
     )
 
 
-# ---------- Clarifying questions ("Ask first" mode) ----------
-
-class Clarifications(BaseModel):
-    questions: list[str]
-
-
-def make_clarifying_questions(llm, query: str, callbacks: list | None = None) -> list[str]:
-    """Up to 2 short questions that would change how the research is done. May be empty."""
-    try:
-        out = llm.with_structured_output(Clarifications).invoke(
-            [
-                (
-                    "system",
-                    "Before researching, decide whether the request is ambiguous in a way that "
-                    "would change the research (scope, timeframe, region, audience, depth). "
-                    "If so, return at most 2 short questions. If it's already clear, return "
-                    "an empty list.",
-                ),
-                ("human", query),
-            ],
-            config={"callbacks": callbacks or []},
-        )
-        return [q.strip() for q in (out.questions if out else []) if q.strip()][:2]
-    except Exception:
-        return []
-
-
 # ---------- Research planning ----------
 
 SOURCES = ["Web", "Wikipedia", "Documents"]
@@ -438,7 +413,6 @@ def plan_to_instructions(steps: list[dict] | None) -> str:
         return ""
     lines = "\n".join(
         f"{i}. {s['question']} (use {' and '.join(_SOURCE_INSTRUCTION[x] for x in s['sources'])})"
-        + (" [optional: only if the required steps leave a gap]" if s.get("priority") == "Optional" else "")
         for i, s in enumerate(steps, 1)
     )
     return f"\n\nFollow this research plan, approved by the user:\n{lines}"

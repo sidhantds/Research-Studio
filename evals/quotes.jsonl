@@ -1,0 +1,12 @@
+{"note": "exact sentence", "evidence": "The James Webb Space Telescope launched on 25 December 2021 from Kourou.", "quote": "launched on 25 December 2021 from Kourou", "expected": true}
+{"note": "different case and curly quotes", "evidence": "Sodium is far more abundant than lithium in the Earth's crust.", "quote": "“Sodium is FAR more abundant than lithium”", "expected": true}
+{"note": "extra whitespace and line break", "evidence": "Solid-state batteries replace the liquid\nelectrolyte with a solid one.", "quote": "replace the liquid electrolyte with a solid one", "expected": true}
+{"note": "markdown emphasis added by the model", "evidence": "Wind power supplied 19% of EU electricity in 2024.", "quote": "Wind power supplied **19%** of EU electricity", "expected": true}
+{"note": "ellipsis joining two real parts", "evidence": "Nuclear power has one of the lowest death rates per unit of energy. Accidents such as Chernobyl are rare but severe.", "quote": "one of the lowest death rates ... rare but severe", "expected": true}
+{"note": "paraphrase, not a quote", "evidence": "The James Webb Space Telescope launched on 25 December 2021 from Kourou.", "quote": "Webb was launched at the end of 2021 from French Guiana", "expected": false}
+{"note": "number changed", "evidence": "Wind power supplied 19% of EU electricity in 2024.", "quote": "Wind power supplied 29% of EU electricity", "expected": false}
+{"note": "negation added", "evidence": "Sodium-ion cells are cheaper to produce than lithium-ion cells.", "quote": "Sodium-ion cells are not cheaper to produce than lithium-ion cells", "expected": false}
+{"note": "one invented part after an ellipsis", "evidence": "Nuclear power has one of the lowest death rates per unit of energy.", "quote": "one of the lowest death rates ... completely risk free in every case", "expected": false}
+{"note": "fully invented", "evidence": "Goldfish can remember things for months, studies show.", "quote": "goldfish have a three-second memory span", "expected": false}
+{"note": "too short to count as evidence", "evidence": "It is true that the wall is long.", "quote": "it is true", "expected": false}
+{"note": "empty quote", "evidence": "Anything at all goes here.", "quote": "", "expected": false}

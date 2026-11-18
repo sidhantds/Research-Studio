@@ -70,14 +70,6 @@ if job:
                 s.execute(job["query"], None, progress, idx=None, route=route)
             else:
                 st.session_state.job = nxt  # clarify or plan first, as their own job
-    elif kind == "clarify":
-        questions = s.draft_clarify(job["query"], progress)
-        if questions:
-            st.session_state.pending_clarify = {"id": uuid.uuid4().hex[:8], "query": job["query"],
-                                                "questions": questions, "idx": thread, "route": job.get("route")}
-        else:  # nothing to ask: go straight to the plan, as its own job
-            st.session_state.job = {"kind": "plan", "query": job["query"], "context": "", "idx": thread,
-                                    "route": job.get("route")}
     elif kind == "plan":
         s.draft_plan(job["query"], job["context"], progress)
         st.session_state.pending_plan["idx"] = thread

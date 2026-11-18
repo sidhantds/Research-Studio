@@ -1,0 +1,25 @@
+{"question": "Generate hello world in Java", "session": false, "expected": "code"}
+{"question": "Write a Python function that checks if a number is prime", "session": false, "expected": "code"}
+{"question": "Create a SQL query that counts orders per customer", "session": false, "expected": "code"}
+{"question": "Fix this loop so it stops at 10", "session": true, "expected": "code"}
+{"question": "Convert this script to TypeScript", "session": true, "expected": "code"}
+{"question": "Explain how this code works", "session": true, "expected": "explanation"}
+{"question": "Walk me through that answer step by step", "session": true, "expected": "explanation"}
+{"question": "What is recursion?", "session": false, "expected": "explanation"}
+{"question": "Explain the difference between a process and a thread", "session": false, "expected": "comparison"}
+{"question": "Research the safety record of nuclear power", "session": false, "expected": "research"}
+{"question": "What are the latest trends in renewable energy?", "session": false, "expected": "research"}
+{"question": "How do solid-state batteries work?", "session": false, "expected": "research"}
+{"question": "Give me a short history of artificial intelligence", "session": false, "expected": "research"}
+{"question": "What has the James Webb Space Telescope discovered?", "session": false, "expected": "research"}
+{"question": "Market share of electric vehicles in Europe in 2026", "session": false, "expected": "research"}
+{"question": "Compare lithium-ion and sodium-ion batteries for grid storage", "session": false, "expected": "comparison"}
+{"question": "PostgreSQL vs MySQL for a small web app", "session": false, "expected": "comparison"}
+{"question": "Which is better for beginners, Python or JavaScript?", "session": false, "expected": "comparison"}
+{"question": "What is the difference between weather and climate?", "session": false, "expected": "comparison"}
+{"question": "Is it true that the Great Wall is visible from space?", "session": false, "expected": "fact_check"}
+{"question": "Fact-check: humans only use 10% of their brains", "session": false, "expected": "fact_check"}
+{"question": "Verify the claim that coffee stunts growth", "session": false, "expected": "fact_check"}
+{"question": "Do goldfish really have a three-second memory?", "session": false, "expected": "fact_check"}
+{"question": "Tell me about it", "session": false, "expected": "clarification"}
+{"question": "Help", "session": false, "expected": "clarification"}

@@ -13,6 +13,28 @@ For where the product is heading, and what is built versus planned, see
 
 ---
 
+## 12. Tests, evals, and a smaller feature set
+
+**Added**
+- `tests/`: 61 offline unit tests (routing, quote matching, claim downgrades, citation renumbering,
+  source rules, JSON repair, evidence). No API key needed; they run in under a second.
+- `evals/`: 25 labeled routing cases and 12 quote cases, with `run_evals.py` (`--live` adds the
+  model router). Keyword rules decide 72% of requests with 100% accuracy; 0 false quote accepts.
+- `checks.py`: the verification logic (quote matching, claim downgrades, answer cleaning, quality
+  checks) moved out of `studio.py` as pure, testable functions.
+- **Partial answers:** research that hits its depth limit is answered from what was found and
+  marked *Partial*, instead of failing.
+- **Failure card:** what went wrong, what was kept, and a Retry button.
+- **Research activity:** a collapsed list of each answer's lookups, with ✓ / ✗.
+
+**Removed**
+- *Ask first* mode (it overlapped with the router's clarification type).
+- Recency filter (search engines only treat it as a hint, so it promised more than it did).
+- Three of the five search engines; one primary plus one fallback remain.
+- Cost estimate and its price settings (token counts are still shown).
+- Required/Optional and who-edited tracking on plan steps.
+- The CLI's `save_tool`, which wrote files to disk without approval. The CLI is now read-only.
+
 ## 11. Intent routing, one answer schema, follow-ups in the same session — `2e7b3a9`
 
 **Intent router** (`agent.py`)

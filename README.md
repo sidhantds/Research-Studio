@@ -74,7 +74,9 @@ The goal isn't "100% accurate". It's that **every material claim is traceable to
 - **Intent routing:** keyword rules handle clear cases with no model call. Only ambiguous requests use one fast LLM call.
 - **Token-efficient follow-ups:** *Use current research* never searches, *Research further* allows at most 2 new searches, and *New research* starts a new case.
 - **Versioned plans:** each step records why the agent added it and whether you edited it. Each plan version is linked to the answer it produced.
-- **Source rules:** allow and deny lists of domains, plus a recency filter. The domain rules are enforced in code on every search result.
+- **Source rules:** allow and deny lists of domains, enforced in code on every search result.
+- **Partial answers, not lost work:** if research hits its depth limit, the answer is written from what was already found and clearly marked *Partial*. Failed runs show what went wrong, what was kept, and a **Retry** button.
+- **Research activity:** each answer has a collapsed list of the lookups it made, with ✓ / ✗ for each.
 - **Case file:** six tabs: Review, Claims, Conflicts, Plan, Evidence and Trace.
 - **Audit export:** a Markdown report with a claims table, conflicts, plan versions, lookups and the run trace.
 
@@ -106,7 +108,8 @@ flowchart LR
 | **Router** | Returns a `Route` (`response_type`, `context_mode`, `needs_tools`, reason). Keyword rules first, LLM fallback | `route_request` · `agent.py` |
 | **Planner** | Structured sub-questions with a reason for each | `make_plan` · `agent.py` |
 | **Agent** | LangChain tool-calling agent. Each run carries a `RunContext` (thread, depth, sources, rules, budget) | `agent.py` |
-| **Tools** | Tries 5 search engines in turn with short timeouts and caching; also Wikipedia, documents and the save request | `tools.py` |
+| **Tools** | Web search (a primary engine plus one fallback, with timeouts and caching), Wikipedia, documents, and an approval-gated save request | `tools.py` |
+| **Checks** | Word-for-word quote matching, claim downgrades, answer cleaning and quality checks. Pure functions, fully unit-tested | `checks.py` |
 | **Answer schema** | One Pydantic `Answer` envelope for every response type. If the reply isn't valid JSON, it is repaired once | `agent.py` |
 | **Claim checker** | Splits the answer into up to 8 claims, then checks each quote in code | `check_claims` · `agent.py` |
 | **Evidence store** | Keeps raw lookups for the audit trail, plus compact evidence items for follow-ups | `evidence.py` |
@@ -138,8 +141,7 @@ Open **http://localhost:8501**. You need Python 3.11+ and a Gemini API key from 
 | Search engines and timeouts | `_ENGINES`, `_ENGINE_TIMEOUT` in `tools.py` |
 | Depth presets · "Research further" budget | `DEPTHS` · `FURTHER_MAX_LOOKUPS` in `studio.py` |
 | Evidence items per follow-up | `PACK_ITEMS` in `evidence.py` |
-| Token prices for cost estimates | `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M` env vars |
-| Source rules and recency | **Settings** in the app |
+| Source rules | **Settings** in the app |
 | Theme | `.streamlit/config.toml` |
 
 ## Using the app
@@ -147,11 +149,11 @@ Open **http://localhost:8501**. You need Python 3.11+ and a Gemini API key from 
 | Where | What you do there |
 |---|---|
 | **Sidebar** | Pick sources (Web, Wikipedia, uploaded PDF/TXT/Markdown) and depth (Quick, Standard, Deep) |
-| **Settings** | Pick a research mode: *Ask first*, *Review plan* or *Auto-research*. Also set source rules and recency |
+| **Settings** | Pick a research mode: *Review plan* or *Auto-research*. Also set source rules |
 | **Research** | Chat, choose a follow-up mode above the chat bar, review claims in the case file, export |
 | **Library** | Every research case with claim and review counts, plus saved files |
 | **Approvals** | Approve or skip file-save requests from the agent |
-| **Runs & quality** | Timing, tokens, cost and quality checks for each run |
+| **Runs & quality** | Timing, tokens and quality checks for each run |
 
 **Try these:**
 
@@ -164,7 +166,32 @@ Open **http://localhost:8501**. You need Python 3.11+ and a Gemini API key from 
 
 ## Evaluation
 
-Every run is scored automatically on the **Runs & quality** page:
+### Offline evals
+
+```bash
+python evals/run_evals.py          # no API key needed
+python evals/run_evals.py --live   # also routes ambiguous requests with Gemini
+```
+
+| Eval | Cases | Result |
+|---|---|---|
+| **Routing by keyword rules** | 25 labeled requests | 72% decided with no model call, **100% accurate** on those (18/18) |
+| **Quote checking** | 12 real, altered and invented quotes | 5/5 real quotes accepted, 7/7 fakes rejected, **0 false accepts** |
+
+A false accept is the dangerous error: it would let an unsupported claim count as supported. The labeled cases are in [`evals/`](evals).
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+61 unit tests cover routing, quote matching, claim downgrades, citation renumbering, source rules, JSON repair and evidence compression. They run offline in under a second.
+
+### Live checks
+
+Every run is also scored automatically on the **Runs & quality** page:
 
 | Check | Passes when |
 |---|---|
@@ -190,11 +217,14 @@ Each run's trace records the timestamp, step, lookups, context size, tokens, mod
 ```text
 app.py            entry point: navigation, sidebar, settings
 app_pages/        research · library · approvals · runs
-studio.py         sessions, runs, claim checks, answer card, case file, export
+studio.py         sessions, research runs, answer card, case file, export
 agent.py          router, Answer schema, prompts, agent, planner, claim checker
+checks.py         quote matching, claim downgrades, answer cleaning, quality checks
 evidence.py       evidence items and compact follow-up context
-tools.py          web search, Wikipedia, documents, source rules, save tool
-main.py           CLI
+tools.py          web search, Wikipedia, documents, source rules
+main.py           CLI (read-only tools)
+tests/            61 offline unit tests
+evals/            labeled routing and quote cases + runner
 assets/           README images
 ```
 
@@ -205,8 +235,11 @@ assets/           README images
 - [x] Conflict handling and review queue
 - [x] Approval-gated file saves
 - [x] Quality scorecard and run trace
+- [x] Offline unit tests and an eval set
+- [x] Partial answers and a clear failure card with Retry
+- [ ] Split `studio.py` into UI and pipeline modules
 - [ ] PDF export of the audit report
-- [ ] Read publication dates so recency is checked, not just requested
+- [ ] Recency filtering based on real publication dates
 - [ ] Edit a plan after it runs, re-run as v2 and compare answers
 - [ ] "Blocked" plan steps and explained mid-run plan changes
 - [ ] High-impact flag that always sends a claim to review
@@ -217,7 +250,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 ## Limitations
 
 - Cases live in the browser session. Export the audit report to keep one.
-- Recency is passed to search engines as a date filter. Wikipedia isn't date-filtered.
+- There's no recency filter. It was removed because search engines only treat dates as a hint.
 - The audit export is Markdown only for now.
 - Claim checks add one model call per answer (code answers skip it).
 - Verification makes claims *traceable*. It doesn't guarantee they're true.
