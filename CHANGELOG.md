@@ -13,6 +13,18 @@ For where the product is heading, and what is built versus planned, see
 
 ---
 
+## 13. Analyst workspace UI
+
+- **Case-first header:** the case title, status, and metric tiles (sources, claims checked, supported,
+  to review, conflicts, version) with a stacked verdict bar, above the conversation.
+- **Claim highlighting:** sentences in the answer and details are coloured by the verdict of the claim
+  they make (matched by keyword overlap, since the checker restates claims). A review decision
+  overrides the colour. Citations sit just after each highlight.
+- **Evidence panel:** research answers render in two columns, the answer on the left and the evidence
+  on the right: verdict bar, each source with its quote and verdict badges, and the claims with
+  Accept / Reject.
+- Wide page layout. 5 new tests for the highlighter and verdict bar (66 in total).
+
 ## 12. Tests, evals, and a smaller feature set
 
 **Added**

@@ -68,6 +68,8 @@ The goal isn't "100% accurate". It's that **every material claim is traceable to
 
 ## Key features
 
+- **Analyst workspace, not a chat feed:** each case opens with a header showing sources, claims checked, supported, to review, conflicts and version, plus a verdict bar. Answers sit beside an **evidence panel** with every source's quote and the verdicts it backs.
+- **Claims highlighted in the answer:** each sentence is coloured by its claim check (green supported, orange partial, red unsupported or conflicting, gray no evidence), so you can see what's verified at a glance.
 - **Claim-level verification:** each claim is *Supported*, *Partially supported*, *Unsupported* or *Insufficient evidence*. A claim is downgraded if its quote can't be found in the retrieved text.
 - **Conflicts:** passages that contradict each other are shown side by side.
 - **Review queue:** the case shows *Needs review* until every flagged claim is accepted or rejected.
@@ -187,7 +189,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-61 unit tests cover routing, quote matching, claim downgrades, citation renumbering, source rules, JSON repair and evidence compression. They run offline in under a second.
+66 unit tests cover routing, quote matching, claim downgrades, citation renumbering, source rules, JSON repair, evidence compression and claim highlighting. They run offline in under a second.
 
 ### Live checks
 
@@ -223,7 +225,7 @@ checks.py         quote matching, claim downgrades, answer cleaning, quality che
 evidence.py       evidence items and compact follow-up context
 tools.py          web search, Wikipedia, documents, source rules
 main.py           CLI (read-only tools)
-tests/            61 offline unit tests
+tests/            66 offline unit tests
 evals/            labeled routing and quote cases + runner
 assets/           README images
 ```

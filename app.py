@@ -41,7 +41,7 @@ MODEL_NAME = agent.MODEL_NAME
 st.set_page_config(
     page_title="Research Studio",
     page_icon=":material/travel_explore:",
-    layout="centered",
+    layout="wide",  # analyst workspace: answer and evidence side by side
 )
 
 s.init_state()

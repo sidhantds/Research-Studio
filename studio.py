@@ -56,7 +56,7 @@ from checks import (
     source_key as _key,
     step_name,
 )
-from evidence import PACK_ITEMS, build_pack, compress_step
+from evidence import PACK_ITEMS, build_pack, compress_step, keywords
 from tools import make_documents_tool, make_search_tool, make_wiki_tool, parse_domains
 
 RESEARCH_PAGE = "app_pages/research.py"
@@ -1433,9 +1433,109 @@ def _render_answer(idx: int, n: int, t: dict, last: bool, locked: bool):
         st.button("Save", type="tertiary", icon=":material/bookmark_add:", key=f"save_turn_{idx}_{n}",
                   on_click=save_turn, args=(idx, n), disabled=locked)
 
-    # Direct answer
-    answer = _inline_citations(c.direct_answer, c.sources)
-    if t.pop("fresh", False) and last and not locked and "```" not in answer and "|" not in answer:
+    claims = t.get("claims") or []
+    researched = bool(c.sources) and c.response_type in ("research", "comparison", "fact_check")
+    if researched:
+        # Analyst layout: the answer on the left, the evidence behind it on the right.
+        left, right = st.columns([3, 2], gap="large")
+        with left:
+            _render_answer_body(idx, n, t, c, claims, last, locked)
+        with right:
+            _render_evidence_panel(idx, n, c, claims, locked)
+    else:
+        _render_answer_body(idx, n, t, c, claims, last, locked)
+        if claims:
+            with st.expander(f"Claims · {claims_summary(claims)}", icon=":material/fact_check:"):
+                for k, cl in enumerate(claims):
+                    _render_claim(idx, n, k, cl, locked, prefix="a")
+
+    # Next steps: only under the newest answer
+    dec = st.session_state.pending_decision
+    if last and c.follow_ups and not (dec and dec["idx"] == idx):
+        key = f"related_{idx}_{n}"
+        st.pills("Next steps", c.follow_ups[:3], key=key, on_change=pick_related, args=(key,), disabled=locked)
+
+
+_HL_COLORS = {"Supported": "green", "Partially supported": "orange", "Unsupported": "red",
+              "Insufficient evidence": "gray"}
+_CITE = re.compile(r"\s*(?:\[\d{1,2}(?:\s*,\s*\d{1,2})*\](?!\())+")
+
+
+def _claim_color(cl: dict) -> str:
+    if cl["review"] == "accepted":
+        return "green"
+    if cl["review"] == "rejected":
+        return "red"
+    return "red" if cl["conflict_quote"] and cl["verdict"] == "Supported" else _HL_COLORS[cl["verdict"]]
+
+
+def _highlight_claims(text: str, claims: list[dict]) -> tuple[str, int]:
+    """Colour each sentence of the answer by the verdict of the claim it makes.
+
+    The checker restates claims in its own words, so sentences are matched to claims by keyword
+    overlap. Citation markers are moved just after the highlight. Returns (markdown, highlights).
+    """
+    if not claims or "```" in text:
+        return text, 0
+    kws = [(keywords(cl["claim"]), cl) for cl in claims]
+    used, out_lines = 0, []
+    for line in text.split("\n"):
+        if not line.strip() or line.lstrip().startswith(("|", "#", ">")):
+            out_lines.append(line)
+            continue
+        prefix = re.match(r"^\s*(?:[-*]|\d+\.)\s+", line)
+        lead, rest = (prefix.group(0), line[prefix.end():]) if prefix else ("", line)
+        parts = []
+        for sent in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9*\"“(])", rest):
+            words = keywords(sent)
+            best, score = None, 0.0
+            for ck, cl in kws:
+                if ck:
+                    s = len(words & ck) / len(ck)
+                    if s > score:
+                        best, score = cl, s
+            body = _CITE.sub("", sent).strip()
+            if best is None or score < 0.5 or not body or "[" in body or "]" in body:
+                parts.append(sent)
+                continue
+            markers = "".join(m.strip() for m in _CITE.findall(sent))
+            parts.append(f":{_claim_color(best)}-background[{body}]" + (f" {markers}" if markers else ""))
+            used += 1
+        out_lines.append(lead + " ".join(parts))
+    return "\n".join(out_lines), used
+
+
+def _confidence_bar(claims: list[dict], height: int = 8) -> str:
+    """A stacked bar of claim verdicts, coloured like the highlights."""
+    palette = {"green": "#4ADE80", "orange": "#FBBF24", "red": "#F87171", "gray": "#5B636B"}
+    counts: dict[str, int] = {}
+    for cl in claims:
+        counts[_claim_color(cl)] = counts.get(_claim_color(cl), 0) + 1
+    segs = "".join(
+        f'<div style="flex:{counts[k]};background:{palette[k]};" title="{counts[k]}"></div>'
+        for k in ("green", "orange", "red", "gray") if counts.get(k))
+    return (f'<div style="display:flex;gap:3px;height:{height}px;border-radius:{height}px;overflow:hidden;'
+            f'margin:4px 0 2px 0;">{segs}</div>')
+
+
+def _verdict_counts(claims: list[dict]) -> str:
+    names = {"green": "supported", "orange": "partial", "red": "unsupported or conflicting", "gray": "no evidence"}
+    counts: dict[str, int] = {}
+    for cl in claims:
+        counts[_claim_color(cl)] = counts.get(_claim_color(cl), 0) + 1
+    return " · ".join(f":{k}[●] {counts[k]} {names[k]}" for k in names if counts.get(k))
+
+
+def _render_answer_body(idx: int, n: int, t: dict, c: Answer, claims: list[dict], last: bool, locked: bool):
+    # Direct answer, with each claim highlighted by its verdict
+    highlighted, n_hl = _highlight_claims(c.direct_answer, claims)
+    answer = _inline_citations(highlighted, c.sources)
+    if n_hl:
+        st.markdown(answer)
+        st.caption("Highlighted by the claim check: :green-background[supported] "
+                   ":orange-background[partly supported] :red-background[unsupported or conflicting] "
+                   ":gray-background[no evidence found]")
+    elif t.pop("fresh", False) and last and not locked and "```" not in answer and "|" not in answer:
         _reveal(answer)
     else:
         st.markdown(answer)
@@ -1460,18 +1560,8 @@ def _render_answer(idx: int, n: int, t: dict, last: bool, locked: bool):
     # Details: only for answers that are research
     if c.details and c.response_type in ("research", "comparison", "fact_check"):
         st.caption("Details")
-        st.markdown("\n".join(f"- {_inline_citations(x, c.sources)}" for x in c.details))
-
-    # Evidence: each cited source with the passage it was cited for
-    if c.sources:
-        st.caption("Evidence")
-        lines = []
-        for i, s in enumerate(c.sources, 1):
-            name = f"[{s.domain or s.title}]({s.url})" if s.url else _md(s.title)
-            what = f"“{_md(s.quote)}”" if s.quote else (_md(", ".join(s.supports)) if s.supports else "")
-            title = f" {_md(s.title)} ·" if s.title and s.title != s.domain else ""
-            lines.append(f"{_sup(i, c.sources)}{title} {name}" + (f" — supports: {what}" if what else ""))
-        st.markdown("  \n".join(lines))
+        st.markdown("\n".join(f"- {_inline_citations(_highlight_claims(x, claims)[0], c.sources)}"
+                              for x in c.details))
 
     st.caption(turn_status(t))
     _render_activity(t)
@@ -1479,17 +1569,31 @@ def _render_answer(idx: int, n: int, t: dict, last: bool, locked: bool):
     if last and grounded and grounded[0] < grounded[1]:
         st.caption(f":orange[{grounded[1] - grounded[0]} of {grounded[1]} sources weren't in the results "
                    "the agent read. Treat them with care.]")
-    claims = t.get("claims") or []
-    if claims:
-        with st.expander(f"Claims · {claims_summary(claims)}", icon=":material/fact_check:"):
-            for k, cl in enumerate(claims):
-                _render_claim(idx, n, k, cl, locked, prefix="a")
 
-    # Next steps: only under the newest answer
-    dec = st.session_state.pending_decision
-    if last and c.follow_ups and not (dec and dec["idx"] == idx):
-        key = f"related_{idx}_{n}"
-        st.pills("Next steps", c.follow_ups[:3], key=key, on_change=pick_related, args=(key,), disabled=locked)
+
+def _render_evidence_panel(idx: int, n: int, c: Answer, claims: list[dict], locked: bool):
+    """The evidence behind an answer: verdict bar, then each source with its quote and the
+    claims it backs, then the claims themselves with review controls."""
+    with st.container(border=True):
+        st.markdown("**Evidence**")
+        if claims:
+            st.html(_confidence_bar(claims))
+            st.caption(_verdict_counts(claims))
+        for i, s in enumerate(c.sources, 1):
+            key = s.url or s.title
+            name = f"[{s.domain or s.title}]({s.url})" if s.url else _md(s.title)
+            st.markdown(f"{_sup(i, c.sources)} **{_md(s.title or s.domain)}**  \n:gray[{name}]")
+            if s.quote:
+                st.markdown(f"> “{_md(s.quote)}”")
+            backed = [cl for cl in claims if cl["source"] == key]
+            if backed:
+                st.markdown(" ".join(f":{_claim_color(cl)}-badge[{cl['verdict']}]" for cl in backed))
+            elif s.supports and not s.quote:
+                st.caption("Supports: " + _md(", ".join(s.supports)))
+        if claims:
+            with st.expander(f"Claims · {claims_summary(claims)}", icon=":material/fact_check:"):
+                for k, cl in enumerate(claims):
+                    _render_claim(idx, n, k, cl, locked, prefix="a")
 
 
 def _render_activity(t: dict):
@@ -1611,10 +1715,23 @@ def render_case_header(idx: int, d: dict, c, locked: bool):
     evidence and run trace."""
     status = dossier_status(d)
     claims, queue, confl = all_claims(d), review_queue(d), conflicts(d)
+    # Case-first header: the research case, not the chat, is the main thing on screen.
     with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.markdown(f"### :material/folder_open: {_md(d['title'])}")
+        st.space("stretch")
         st.badge(status, color=STATUS_COLORS[status])
-        st.caption(" · ".join([_plural(len(d["sources"]), "source"), _plural(len(claims), "claim"),
-                               _plural(len(confl), "conflict"), f"v{d.get('version', 1)}"]))
+    with st.container(horizontal=True, gap="small"):
+        st.metric("Sources", len(d["sources"]), border=True)
+        st.metric("Claims checked", len(claims), border=True)
+        st.metric("Supported", f"{sum(cl['verdict'] == 'Supported' for _, _, cl in claims)}/{len(claims)}"
+                  if claims else "–", border=True)
+        st.metric("To review", len(queue), border=True)
+        st.metric("Conflicts", len(confl), border=True)
+        st.metric("Version", f"v{d.get('version', 1)}", border=True)
+    if claims:
+        st.html(_confidence_bar([cl for _, _, cl in claims], height=10))
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.caption(_verdict_counts([cl for _, _, cl in claims]) if claims else "No claims checked yet.")
         st.space("stretch")
         if c is not None:
             with st.popover("Export", type="tertiary", icon=":material/download:", disabled=locked):
