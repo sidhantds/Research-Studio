@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="280" viewBox="0 0 1200 280" role="img" aria-label="Research Studio: answers you can audit">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101214"/>
+      <stop offset="1" stop-color="#151A20"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.82" cy="0.35" r="0.55">
+      <stop offset="0" stop-color="#4C8DF6" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#4C8DF6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#2A2F34" stroke-width="1" opacity="0.45"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="280" rx="18" fill="url(#bg)"/>
+  <rect width="1200" height="280" rx="18" fill="url(#grid)"/>
+  <rect width="1200" height="280" rx="18" fill="url(#glow)"/>
+  <rect x="0.5" y="0.5" width="1199" height="279" rx="18" fill="none" stroke="#2A2F34"/>
+
+  <!-- wordmark -->
+  <g font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+    <text x="72" y="104" fill="#9AA4AE" font-size="15" font-weight="600" letter-spacing="3">AI RESEARCH AGENT</text>
+    <text x="70" y="160" fill="#E7EAED" font-size="56" font-weight="700" letter-spacing="-1.5">Research Studio</text>
+    <text x="72" y="204" fill="#9AA4AE" font-size="21">Answers you can audit, with every claim checked against its source.</text>
+  </g>
+
+  <!-- claim-check motif -->
+  <g transform="translate(838 70)" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
+    <rect width="290" height="140" rx="12" fill="#171A1D" stroke="#2A2F34"/>
+    <g transform="translate(18 30)">
+      <circle r="6" cx="6" cy="-4" fill="#4ADE80"/>
+      <rect x="22" y="-10" width="170" height="10" rx="5" fill="#2A2F34"/>
+      <text x="204" y="0" fill="#4ADE80" font-weight="600">Supported</text>
+    </g>
+    <g transform="translate(18 66)">
+      <circle r="6" cx="6" cy="-4" fill="#4ADE80"/>
+      <rect x="22" y="-10" width="140" height="10" rx="5" fill="#2A2F34"/>
+      <text x="204" y="0" fill="#4ADE80" font-weight="600">Supported</text>
+    </g>
+    <g transform="translate(18 102)">
+      <circle r="6" cx="6" cy="-4" fill="#FBBF24"/>
+      <rect x="22" y="-10" width="155" height="10" rx="5" fill="#2A2F34"/>
+      <text x="204" y="0" fill="#FBBF24" font-weight="600">Review</text>
+    </g>
+  </g>
+</svg>
