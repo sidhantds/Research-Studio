@@ -1,36 +1,22 @@
 # Research Studio
 
-A research agent that turns a question into a sourced report. It drafts a research plan for you to review, searches the web and Wikipedia while you watch, and returns a report with key findings, inline citations and the raw evidence behind them.
+A research agent that answers questions with real research: it searches the web, Wikipedia and your own documents, cross-checks what it finds, and answers in plain prose with small inline citations to the sources it actually read. Follow-up questions continue the same conversation, reusing what's already been found.
 
 Built with [LangChain](https://www.langchain.com/), Google Gemini and [Streamlit](https://streamlit.io/).
 
 ## Features
 
-- **Three research modes** (sidebar):
-  - **Ask first**: the agent asks up to two clarifying questions if your request is ambiguous, then proposes a plan.
-  - **Review plan**: the agent breaks your question into sub-questions, each with its sources, for you to edit and approve.
-  - **Auto-research**: plans and runs without stopping.
-- **Choose your sources**: web search, Wikipedia, and your own uploaded documents (PDF, TXT, Markdown).
-- **Depth**: Quick, Standard or Deep. Each sets how many lookups the agent makes, how long the report is, and a step and time limit for the run.
-- **Live progress**: a one-line progress strip shows what the agent is doing (`✓ Web search · Reading Wikipedia...`). Expand it to see each tool call.
-- **One adaptive answer card**: an answer-type chip ("Explanation", "Code answer · Java", "Comparison"...), then **Answer**, **Details** with `[1]`-style citations, **Evidence**, and **Next steps** suggested for that specific answer. Sections only appear when they add information.
-- **Follow-ups stay in the same research session**. A selector next to the composer chooses how each follow-up is handled:
-
-  | Mode | What happens | Searches |
-  |---|---|---|
-  | Answer from this research (default) | Updates the card using evidence already gathered | Usually 0 |
-  | Research further | Fetches only what's missing, then updates the card | At most 2 |
-  | New research | Starts a separate session | Full run |
-
-  If the existing evidence can't answer a follow-up, the app asks before searching. If the follow-up is a different topic, it suggests starting new research. Every update becomes a new **version** with a change record ("No new searches were required", "1 new search. Added 1 new source."), and the card keeps a change history.
-- **Lower token use**: follow-ups send a compact evidence pack (current card plus trimmed snippets) instead of the whole conversation. Repeat lookups are cached, and answering from existing research can't add new sources.
-- **Approval before saving**: the agent can only *request* to save a file. Nothing is saved until you approve it on the **Approvals** page.
-- **Library**: every report from the session, plus files you've saved. Saves are private to each visitor's session; download anything you want to keep.
-- **Runs & quality**: every run with timing, tokens and three automatic checks:
-  - valid report format
-  - sources grounded (each cited source appears in what the tools returned)
-  - plan followed
-- **Usage tracking**: token counts from every model call, and a cost estimate once you enter prices under **Settings**.
+- **Research first**: the agent searches before stating facts, uses more than one source for important claims, prefers authoritative sources, and says when sources disagree or evidence is thin.
+- **Inline citations**: claims carry small superscript citations (¹ ²) linked to their sources, with one compact source line under each answer. Each cited source is checked against what the tools actually returned, and the app flags any that weren't.
+- **Chat-style threads**: each follow-up gets its own answer below the earlier ones. Follow-ups are answered from the evidence the conversation already has (0 searches). When that isn't enough, the agent searches for what's missing (up to 2 searches). A question on a different topic offers to start a new research session.
+- **Sources and depth** (sidebar): pick Web, Wikipedia and/or uploaded Documents (PDF, TXT, Markdown), and Quick, Standard or Deep. Depth sets how many lookups the agent makes and a step and time limit.
+- **Live progress**: a one-line progress strip shows what the agent is doing (`✓ Web search · Reading Wikipedia...`). Expand it to see each lookup; every session keeps its research steps.
+- **Optional planning** (Settings → Before researching): *Auto-research* by default. *Review plan* lets you edit and approve the research plan first; *Ask first* also asks up to two clarifying questions.
+- **Reliable search**: several search engines are tried in turn, each with a short timeout, and repeat lookups are cached.
+- **Lower token use**: follow-ups send a compact evidence pack (recent answers, numbered sources, trimmed snippets) instead of the whole conversation.
+- **Approval before saving**: the agent can only *request* to save a file; an **Approvals** link appears when something is waiting.
+- **Library**: every research session, plus files you've saved. Saves are private to each visitor's session; download anything you want to keep.
+- **Runs & quality** (Settings): every run with timing, tokens, searches and automatic checks (valid format, sources grounded, plan followed, follow-ups answered without new searches), plus an optional cost estimate.
 - **Prompt-injection guard**: text returned by tools is treated as reference material, never as instructions.
 - **CLI mode**: `main.py` runs the same agent in the terminal and prints JSON.
 
@@ -121,7 +107,7 @@ Tool failures, such as a search timeout, are returned to the agent as messages i
 | What | Where |
 |---|---|
 | Gemini model | `MODEL_NAME` in `agent.py` |
-| Search engines | `backend=` in `tools.py` |
+| Search engines and timeouts | `_ENGINES`, `_ENGINE_TIMEOUT` in `tools.py` |
 | Depth presets (lookups, step and time limits) | `DEPTHS` in `studio.py` |
 | Follow-up search budget and evidence pack size | `FURTHER_MAX_LOOKUPS`, `EVIDENCE_PACK_CHARS` in `studio.py` |
 | Default token prices for cost estimates | `PRICE_INPUT_PER_M` and `PRICE_OUTPUT_PER_M` environment variables or secrets |
@@ -151,7 +137,7 @@ Run it through Python instead: `python -m streamlit run app.py`.
 Windows Smart App Control can block some compiled packages, such as pandas. The app avoids features that need pandas, so it runs with the policy on. If you add features that use pandas, you may need to adjust the policy.
 
 **Search keeps failing**
-Some networks block certain search engines. Edit the `backend=` list in `tools.py`. The agent still answers from Wikipedia when web search fails.
+Some networks block certain search engines. The app tries several in turn; reorder or trim the `_ENGINES` list in `tools.py` to put the ones that work for you first. Wikipedia still works when web search fails.
 
 **"No `GOOGLE_API_KEY` found"**
 Make sure `.env` is in the project root and restart the app.

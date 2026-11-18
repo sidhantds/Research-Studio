@@ -1,11 +1,9 @@
 import wikipedia
-from langchain_community.tools import DuckDuckGoSearchRun, WikipediaQueryRun
-from langchain_community.utilities import (
-    DuckDuckGoSearchAPIWrapper,
-    WikipediaAPIWrapper,
-)
+from langchain_community.tools import WikipediaQueryRun
+from langchain_community.utilities import WikipediaAPIWrapper
 from langchain_core.tools import Tool
 from datetime import datetime
+import time
 import re
 
 def save_to_txt(data: str, filename: str = "Research_output.txt"):
@@ -21,14 +19,6 @@ save_tool= Tool(
       func= save_to_txt,
       description="seach the web for information",
 )
-# ddgs has no "html" backend (it silently fell back to random engines, incl.
-# Startpage which times out). List reliable engines explicitly; ddgs tries them in turn.
-_ddg_search = DuckDuckGoSearchRun(
-    api_wrapper=DuckDuckGoSearchAPIWrapper(
-        backend="duckduckgo,bing,mojeek,yahoo", max_results=3
-    )
-)
-
 
 # Cache of successful lookups by normalized query, shared across sessions (public data only).
 # Repeat questions and follow-ups reuse results instead of searching again. Failures aren't cached.
@@ -50,13 +40,31 @@ def _cached(kind: str, query: str, fetch) -> str:
     return _CACHE[key]
 
 
+# Engines tried one at a time, fastest and most reliable first. Each gets a short timeout and
+# the whole search a total budget, so one engine timing out doesn't sink the lookup.
+# (Bing is left out: it ignores the timeout and can hang for ~25s.)
+_ENGINES = ["yahoo", "duckduckgo", "mojeek", "brave", "google"]
+_ENGINE_TIMEOUT = 8
+_SEARCH_BUDGET_SECONDS = 25
+
+
 def _fetch_web(query: str) -> str:
-    results = _ddg_search.api_wrapper.results(query, max_results=3)
-    if not results:
-        return "No web results found."
-    return "\n\n".join(
-        f"{r.get('title', '')}\n{r.get('snippet', '')}\nURL: {r.get('link', '')}" for r in results
-    )
+    from ddgs import DDGS
+
+    started, errors = time.monotonic(), []
+    for engine in _ENGINES:
+        if time.monotonic() - started > _SEARCH_BUDGET_SECONDS:
+            break
+        try:
+            results = DDGS(timeout=_ENGINE_TIMEOUT).text(query, backend=engine, max_results=4)
+        except Exception as e:
+            errors.append(f"{engine}: {type(e).__name__}")
+            continue
+        if results:
+            return "\n\n".join(
+                f"{r.get('title', '')}\n{r.get('body', '')}\nURL: {r.get('href', '')}" for r in results
+            )
+    raise RuntimeError("no engine returned results (" + ", ".join(errors) + ")")
 
 
 def _safe_search(query: str) -> str:
@@ -70,7 +78,7 @@ def _safe_search(query: str) -> str:
     except Exception as e:
         return (
             f"Web search failed ({type(e).__name__}: {e}). "
-            "Use the wikipedia tool or your own knowledge instead."
+            "Try a shorter or different query, or the wikipedia tool. Don't fill gaps from memory."
         )
 
 
@@ -88,14 +96,24 @@ api_wrapper = WikipediaAPIWrapper(
 _wiki = WikipediaQueryRun(api_wrapper=api_wrapper)
 
 
+def _wiki_with_urls(query: str) -> str:
+    """Wikipedia results with each article's URL, so they can be cited and checked."""
+    text = _wiki.run(query)
+    return re.sub(
+        r"^Page: (.+)$",
+        lambda m: f"Page: {m.group(1)}\nURL: https://en.wikipedia.org/wiki/{m.group(1).strip().replace(' ', '_')}",
+        text, flags=re.M,
+    )
+
+
 def _safe_wiki(query: str) -> str:
     """Wikipedia occasionally returns an empty/HTML body (JSONDecodeError); don't crash."""
     try:
-        return _cached("wiki", query, _wiki.run)
+        return _cached("wiki", query, _wiki_with_urls)
     except Exception as e:
         return (
             f"Wikipedia lookup failed ({type(e).__name__}). "
-            "Use the duckduckgo_search tool or your own knowledge instead."
+            "Try the web search tool or a different query. Don't fill gaps from memory."
         )
 
 

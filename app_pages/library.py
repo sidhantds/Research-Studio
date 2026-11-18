@@ -21,12 +21,13 @@ with reports_tab:
                 if c:
                     st.badge(c.answer_type, color="gray")
                 st.badge(status, color=s.STATUS_COLORS[status])
-            preview = c.answer if c else d.get("error") or ""
+            preview = c.answer if c else (d["turns"][0]["error"] if d["turns"] else "") or ""
             if preview:
                 st.caption(preview[:200] + ("…" if len(preview) > 200 else ""))
             with st.container(horizontal=True, vertical_alignment="center"):
-                n_versions = len(d["versions"])
-                st.caption(f"Version {n_versions} · Updated {d['updated']} · {s.source_count(d)} sources")
+                n_q, n_s = len(d["turns"]), s.source_count(d)
+                st.caption(f"{n_q} question{'s' if n_q != 1 else ''} · Updated {d['updated']} · "
+                           f"{n_s} source{'s' if n_s != 1 else ''}")
                 st.space("stretch")
                 if st.button("Open", key=f"lib_open_{d['id']}", type="tertiary"):
                     s.open_report(i)
