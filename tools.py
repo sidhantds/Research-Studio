@@ -30,6 +30,35 @@ _ddg_search = DuckDuckGoSearchRun(
 )
 
 
+# Cache of successful lookups by normalized query, shared across sessions (public data only).
+# Repeat questions and follow-ups reuse results instead of searching again. Failures aren't cached.
+_CACHE: dict[tuple[str, str], str] = {}
+_CACHE_MAX = 500
+
+
+def _norm(query: str) -> str:
+    return re.sub(r"\s+", " ", query.strip().lower())
+
+
+def _cached(kind: str, query: str, fetch) -> str:
+    """Return a cached result, or fetch and cache it. Exceptions propagate uncached."""
+    key = (kind, _norm(query))
+    if key not in _CACHE:
+        if len(_CACHE) >= _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)))  # drop the oldest entry
+        _CACHE[key] = fetch(query)
+    return _CACHE[key]
+
+
+def _fetch_web(query: str) -> str:
+    results = _ddg_search.api_wrapper.results(query, max_results=3)
+    if not results:
+        return "No web results found."
+    return "\n\n".join(
+        f"{r.get('title', '')}\n{r.get('snippet', '')}\nURL: {r.get('link', '')}" for r in results
+    )
+
+
 def _safe_search(query: str) -> str:
     """Never let a network hiccup crash the whole agent run.
 
@@ -37,12 +66,7 @@ def _safe_search(query: str) -> str:
     (and so citations can be checked against what the agent actually read).
     """
     try:
-        results = _ddg_search.api_wrapper.results(query, max_results=3)
-        if not results:
-            return "No web results found."
-        return "\n\n".join(
-            f"{r.get('title', '')}\n{r.get('snippet', '')}\nURL: {r.get('link', '')}" for r in results
-        )
+        return _cached("web", query, _fetch_web)
     except Exception as e:
         return (
             f"Web search failed ({type(e).__name__}: {e}). "
@@ -59,7 +83,7 @@ search_tool = Tool(
 api_wrapper = WikipediaAPIWrapper(
     wiki_client=wikipedia,
     top_k_results=1,
-    doc_content_chars_max=100,
+    doc_content_chars_max=1200,  # enough text to reuse as evidence in follow-ups
 )
 _wiki = WikipediaQueryRun(api_wrapper=api_wrapper)
 
@@ -67,7 +91,7 @@ _wiki = WikipediaQueryRun(api_wrapper=api_wrapper)
 def _safe_wiki(query: str) -> str:
     """Wikipedia occasionally returns an empty/HTML body (JSONDecodeError); don't crash."""
     try:
-        return _wiki.run(query)
+        return _cached("wiki", query, _wiki.run)
     except Exception as e:
         return (
             f"Wikipedia lookup failed ({type(e).__name__}). "

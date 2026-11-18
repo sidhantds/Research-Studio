@@ -13,12 +13,17 @@ Built with [LangChain](https://www.langchain.com/), Google Gemini and [Streamlit
 - **Choose your sources**: web search, Wikipedia, and your own uploaded documents (PDF, TXT, Markdown).
 - **Depth**: Quick, Standard or Deep. Each sets how many lookups the agent makes, how long the report is, and a step and time limit for the run.
 - **Live progress**: a one-line progress strip shows what the agent is doing (`✓ Web search · Reading Wikipedia...`). Expand it to see each tool call.
-- **Structured reports** with:
-  - a one-sentence answer
-  - key findings with `[1]`-style citations linked to their sources
-  - a detailed report and a numbered source list
-  - the raw tool output, collapsed by default
-- **Act on findings**: each finding has **Explore**, **Check sources** and **Ask follow-up** buttons.
+- **One adaptive answer card**: an answer-type chip ("Explanation", "Code answer · Java", "Comparison"...), then **Answer**, **Details** with `[1]`-style citations, **Evidence**, and **Next steps** suggested for that specific answer. Sections only appear when they add information.
+- **Follow-ups stay in the same research session**. A selector next to the composer chooses how each follow-up is handled:
+
+  | Mode | What happens | Searches |
+  |---|---|---|
+  | Answer from this research (default) | Updates the card using evidence already gathered | Usually 0 |
+  | Research further | Fetches only what's missing, then updates the card | At most 2 |
+  | New research | Starts a separate session | Full run |
+
+  If the existing evidence can't answer a follow-up, the app asks before searching. If the follow-up is a different topic, it suggests starting new research. Every update becomes a new **version** with a change record ("No new searches were required", "1 new search. Added 1 new source."), and the card keeps a change history.
+- **Lower token use**: follow-ups send a compact evidence pack (current card plus trimmed snippets) instead of the whole conversation. Repeat lookups are cached, and answering from existing research can't add new sources.
 - **Approval before saving**: the agent can only *request* to save a file. Nothing is saved until you approve it on the **Approvals** page.
 - **Library**: every report from the session, plus files you've saved. Saves are private to each visitor's session; download anything you want to keep.
 - **Runs & quality**: every run with timing, tokens and three automatic checks:
@@ -118,6 +123,7 @@ Tool failures, such as a search timeout, are returned to the agent as messages i
 | Gemini model | `MODEL_NAME` in `agent.py` |
 | Search engines | `backend=` in `tools.py` |
 | Depth presets (lookups, step and time limits) | `DEPTHS` in `studio.py` |
+| Follow-up search budget and evidence pack size | `FURTHER_MAX_LOOKUPS`, `EVIDENCE_PACK_CHARS` in `studio.py` |
 | Default token prices for cost estimates | `PRICE_INPUT_PER_M` and `PRICE_OUTPUT_PER_M` environment variables or secrets |
 | Theme colors and font | `.streamlit/config.toml` |
 

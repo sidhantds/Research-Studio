@@ -1,4 +1,10 @@
-"""Shared state, helpers and components for the Research Studio pages."""
+"""Shared state, helpers and components for the Research Studio pages.
+
+A research *session* (stored in st.session_state.dossiers) starts with one question and
+keeps one answer card. Follow-ups update that card as a new version instead of starting
+over. Each session keeps the tool results it has gathered as an evidence pack, so most
+follow-ups are answered without searching again.
+"""
 
 import io
 import os
@@ -16,12 +22,15 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 
 from agent import (
     AgentResult,
+    ResearchResponse,
     TokenCounter,
+    answer_from_evidence,
     build_agent_executor,
     get_llm,
     make_clarifying_questions,
     make_plan,
     plan_to_instructions,
+    research_further_instructions,
     run_research,
 )
 from tools import make_documents_tool, search_tool, wiki_tool
@@ -36,16 +45,19 @@ MODE_CAPTIONS = [
     "Plan and research without stopping",
 ]
 
+FOLLOWUP_MODES = ["Answer from this research", "Research further", "New research"]
+FURTHER_MAX_LOOKUPS = 2  # tool budget for a "Research further" follow-up
+EVIDENCE_PACK_CHARS = 6000  # cap on stored snippets sent with each follow-up
+
 DEPTHS = {
     "Quick": {"steps": "1 to 2", "max_iterations": 6, "max_seconds": 60,
-              "instruction": "Research depth: quick. Use at most 2 lookups. Give 2 to 3 key findings "
-                             "and a short report of 1 to 2 paragraphs."},
+              "instruction": "Research depth: quick. Use at most 2 lookups. Give 2 to 3 details."},
     "Standard": {"steps": "2 to 4", "max_iterations": 10, "max_seconds": 150, "instruction": ""},
     "Deep": {"steps": "4 to 6", "max_iterations": 20, "max_seconds": 300,
              "instruction": "Research depth: deep. Cross-check important facts across several lookups. "
-                            "Give 5 to 7 key findings and a detailed report of 4 to 6 paragraphs."},
+                            "Give 4 to 6 details and use the summary for longer context."},
 }
-DEPTH_CAPTIONS = ["Fewer lookups, short report", "Balanced", "More lookups, longer report"]
+DEPTH_CAPTIONS = ["Fewer lookups, short answer", "Balanced", "More lookups, fuller answer"]
 
 # Source label -> (sidebar checkbox key, tool name)
 SOURCE_KEYS = {"Web": "src_web", "Wikipedia": "src_wiki", "Documents": "src_docs"}
@@ -63,6 +75,7 @@ STEP_VERBS = {
     "search_documents": "Reading your documents",
     "request_save_file": "Preparing a file to save",
 }
+LOOKUP_TOOLS = {"duckduckgo_search", "wikipedia", "search_documents"}
 STATUS_COLORS = {
     # Blue is reserved for the one primary action per view; in-progress states stay neutral.
     "Needs your input": "orange",
@@ -84,14 +97,18 @@ SUGGESTIONS = {
 
 # ---------- State ----------
 
+def _fresh_research_state() -> dict:
+    return {"active": None, "pending_plan": None, "pending_clarify": None, "pending_decision": None}
+
+
 def init_state():
     defaults = {
-        "dossiers": [],  # every research run this session (also the run log)
-        "active": None,  # index of the report on screen
-        "pending_clarify": None,  # clarifying questions awaiting answers
-        "pending_plan": None,  # plan awaiting approval
+        "dossiers": [],  # research sessions
+        "runs": [],  # every model run (new research and follow-ups), for Runs & quality
+        **_fresh_research_state(),
         "pending_saves": [],  # file writes awaiting approval
         "queued_prompt": None,  # prompt queued by a button
+        "queued_mode": None,  # follow-up mode forced by that button, if any
         # Saves live in this visitor's session only. On a shared server (e.g. Streamlit
         # Cloud) a disk folder would be visible to every visitor and wiped on restart.
         "saved_files": [],
@@ -109,6 +126,10 @@ def mode() -> str:
 
 def depth() -> str:
     return st.session_state.get("depth") or "Standard"
+
+
+def followup_mode() -> str:
+    return st.session_state.get("followup_mode") or FOLLOWUP_MODES[0]
 
 
 def enabled_sources() -> list[str]:
@@ -131,6 +152,10 @@ def has_api_key() -> bool:
     return bool(os.getenv("GOOGLE_API_KEY"))
 
 
+def now() -> str:
+    return datetime.now().strftime("%H:%M")
+
+
 # ---------- Usage & cost ----------
 
 def add_usage(counter: TokenCounter):
@@ -145,6 +170,15 @@ def estimate_cost(input_tokens: int, output_tokens: int) -> float | None:
     if not p_in and not p_out:
         return None
     return input_tokens / 1e6 * p_in + output_tokens / 1e6 * p_out
+
+
+def log_run(kind: str, query: str, session_id: str | None, seconds: float, counter: TokenCounter,
+            searches: int, status: str, checks: dict | None = None, error: str | None = None):
+    st.session_state.runs.append({
+        "time": now(), "kind": kind, "query": query, "session": session_id, "seconds": seconds,
+        "tokens_in": counter.input_tokens, "tokens_out": counter.output_tokens, "searches": searches,
+        "status": status, "checks": checks or {}, "error": error, "depth": depth(),
+    })
 
 
 # ---------- Uploaded documents ----------
@@ -196,8 +230,13 @@ def safe_filename(name: str) -> str:
     return name if name.lower().endswith(".txt") else f"{name}.txt"
 
 
+def card(d: dict) -> ResearchResponse | None:
+    r = d.get("result")
+    return r.response if r else None
+
+
 def dossier_status(d: dict) -> str:
-    if d.get("error"):
+    if d.get("error") and card(d) is None:
         return "Failed"
     if any(r.get("dossier") == d["id"] for r in st.session_state.pending_saves):
         return "Needs approval"
@@ -205,30 +244,22 @@ def dossier_status(d: dict) -> str:
 
 
 def source_count(d: dict) -> int:
-    r = d.get("result")
-    return len(r.response.sources) if r and r.response else 0
+    c = card(d)
+    return len(c.sources) if c else 0
 
 
 def report_markdown(result: AgentResult) -> str:
     r = result.response
     if r is None:
         return result.raw_text
-    findings = "\n".join(f"- {f.text}" for f in r.key_findings)
-    sources = "\n".join(f"{i}. {s}" for i, s in enumerate(r.sources, 1)) or "None"
-    parts = [f"# {r.topic}", r.answer, f"## Key findings\n{findings}" if findings else "",
-             f"## Detailed report\n{r.summary}", f"## Sources\n{sources}"]
-    return "\n\n".join(p for p in parts if p) + "\n"
-
-
-def history_for_agent() -> list[tuple[str, str]]:
-    turns = []
-    for d in st.session_state.dossiers:
-        r = d.get("result")
-        if r is None or r.response is None:
-            continue
-        turns.append(("user", d["query"]))
-        turns.append(("assistant", r.response.answer or r.response.summary))
-    return turns
+    parts = [f"# {r.topic}", f"*{r.answer_type}*", r.answer]
+    if r.details or r.summary:
+        details = "\n".join(f"- {f.text}" + (f" [{', '.join(map(str, f.source_ids))}]" if f.source_ids else "")
+                            for f in r.details)
+        parts.append("## Details\n" + "\n\n".join(p for p in (details, r.summary) if p))
+    if r.sources:
+        parts.append("## Evidence\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(r.sources, 1)))
+    return "\n\n".join(parts) + "\n"
 
 
 def scope_estimate(steps: list[dict]) -> str:
@@ -238,7 +269,56 @@ def scope_estimate(steps: list[dict]) -> str:
     return f"{lookups} lookup{'s' if lookups != 1 else ''} · {when}"
 
 
-# ---------- Automatic quality checks (run on every report) ----------
+def _plural(n: int, word: str) -> str:
+    if n == 1:
+        return f"{n} {word}"
+    return f"{n} {word}{'es' if word.endswith(('ch', 'sh', 's', 'x')) else 's'}"
+
+
+# ---------- Evidence pack ----------
+
+def evidence_pack(d: dict) -> str:
+    """Compact context for follow-ups: the current card plus trimmed tool snippets.
+
+    Sends the original question, the current answer, its details and numbered sources,
+    and the newest tool results up to EVIDENCE_PACK_CHARS. Never the whole chat or raw pages.
+    """
+    r = card(d)
+    parts = [f"ORIGINAL QUESTION: {d['query']}"]
+    followups = [v["question"] for v in d["versions"][1:]]
+    if followups:
+        parts.append("EARLIER FOLLOW-UPS:\n" + "\n".join(f"- {q}" for q in followups[-5:]))
+    if r:
+        parts.append(f"CURRENT ANSWER ({r.answer_type}):\n{r.answer}")
+        if r.details:
+            parts.append("CURRENT DETAILS:\n" + "\n".join(f"- {f.text} (sources {f.source_ids})" for f in r.details))
+        if r.summary:
+            parts.append(f"CURRENT CONTEXT:\n{r.summary[:1500]}")
+        if r.sources:
+            parts.append("SOURCES:\n" + "\n".join(f"[{i}] {s}" for i, s in enumerate(r.sources, 1)))
+    snippets, budget = [], EVIDENCE_PACK_CHARS
+    for step in reversed(d["evidence"]):  # newest first
+        snip = f"({step_name(step.tool)}: {step.tool_input[:80]})\n{step.output[:700]}"
+        if len(snip) > budget:
+            break
+        snippets.append(snip)
+        budget -= len(snip)
+    if snippets:
+        parts.append("EVIDENCE SNIPPETS:\n" + "\n\n".join(snippets))
+    return "\n\n".join(parts)
+
+
+def _add_evidence(d: dict, steps: list):
+    seen = {(s.tool, s.tool_input) for s in d["evidence"]}
+    for s in steps:
+        if s.output.startswith("Search budget"):
+            continue
+        if s.tool in LOOKUP_TOOLS and (s.tool, s.tool_input) not in seen:
+            d["evidence"].append(s)
+            seen.add((s.tool, s.tool_input))
+
+
+# ---------- Automatic quality checks ----------
 
 def _is_grounded(source: str, outputs: str, used_tools: set[str]) -> bool:
     src = source.strip().lower().rstrip("/")
@@ -254,26 +334,25 @@ def _is_grounded(source: str, outputs: str, used_tools: set[str]) -> bool:
     return src.startswith("wikipedia") and "wikipedia" in used_tools
 
 
-def quality_checks(result: AgentResult | None, plan_steps: list[dict] | None) -> dict:
-    if result is None:
-        return {"format": False, "grounded": None, "plan": None}
-    used = {s.tool for s in result.steps}
-    outputs = "\n".join(s.output for s in result.steps).lower()
+def quality_checks(response: ResearchResponse | None, steps: list, plan_steps: list[dict] | None) -> dict:
+    used = {s.tool for s in steps}
+    outputs = "\n".join(s.output for s in steps).lower()
     grounded = None
-    if result.response and result.response.sources:
-        hits = sum(_is_grounded(s, outputs, used) for s in result.response.sources)
-        grounded = (hits, len(result.response.sources))
+    if response and response.sources:
+        hits = sum(_is_grounded(s, outputs, used) for s in response.sources)
+        grounded = (hits, len(response.sources))
     plan = None
     if plan_steps:
         needed = {SOURCE_TOOLS[x] for s in plan_steps for x in s["sources"]}
         plan = needed <= used
-    return {"format": result.response is not None, "grounded": grounded, "plan": plan}
+    return {"format": response is not None, "grounded": grounded, "plan": plan}
 
 
 # ---------- Callbacks ----------
 
-def queue_prompt(prompt: str):
+def queue_prompt(prompt: str, followup: str | None = None):
     st.session_state.queued_prompt = prompt
+    st.session_state.queued_mode = followup
 
 
 def prefill_composer(text: str):
@@ -288,9 +367,8 @@ def pick_suggestion():
 
 
 def new_research():
-    st.session_state.active = None
-    st.session_state.pending_plan = None
-    st.session_state.pending_clarify = None
+    for k, v in _fresh_research_state().items():
+        st.session_state[k] = v
 
 
 def open_report(idx: int):
@@ -301,6 +379,7 @@ def open_report(idx: int):
 def clear_history():
     new_research()
     st.session_state.dossiers = []
+    st.session_state.runs = []
     st.session_state.pending_saves = []
     st.session_state.usage = {"input": 0, "output": 0}
 
@@ -321,6 +400,30 @@ def add_plan_step():
 def remove_plan_step(sid: str):
     plan = st.session_state.pending_plan
     plan["steps"] = [s for s in plan["steps"] if s["sid"] != sid]
+
+
+def new_research_job(query: str) -> dict:
+    """A job that starts a separate research session, following the sidebar's research mode."""
+    return {
+        "Ask first": {"kind": "clarify", "query": query},
+        "Review plan": {"kind": "plan", "query": query, "context": ""},
+        "Auto-research": {"kind": "research", "query": query, "steps": None, "context": ""},
+    }[mode()]
+
+
+def decide(choice: str):
+    """Resolve the 'evidence isn't enough' card."""
+    dec = st.session_state.pending_decision
+    st.session_state.pending_decision = None
+    if not dec:
+        return
+    if choice == "further":
+        st.session_state.job = {"kind": "further", "idx": dec["idx"], "question": dec["question"]}
+    elif choice == "anyway":
+        st.session_state.job = {"kind": "context", "idx": dec["idx"], "question": dec["question"], "force": True}
+    else:
+        st.session_state.active = None
+        st.session_state.job = new_research_job(dec["question"])
 
 
 def _store_file(name: str, data: str) -> str:
@@ -364,8 +467,9 @@ class LiveProgress(BaseCallbackHandler):
 
     run_inline = True
 
-    def __init__(self, status):
+    def __init__(self, status, finishing: str = "Drafting the answer"):
         self.status = status
+        self.finishing = finishing
         self.ctx = get_script_run_ctx()
         self.done: dict[str, int] = {}
         self.current = None
@@ -395,7 +499,7 @@ class LiveProgress(BaseCallbackHandler):
             st.caption(text[:300] + ("…" if len(text) > 300 else ""))
         step.update(state="error" if " failed (" in text[:60] else "complete")
         self.done[step_name(name)] = self.done.get(step_name(name), 0) + 1
-        self.status.update(label=self._label("Drafting report"))
+        self.status.update(label=self._label(self.finishing))
         self.current = None
 
     def on_tool_error(self, error, **kwargs):
@@ -420,7 +524,45 @@ def make_request_save_tool(pending: list) -> Tool:
     )
 
 
-# ---------- Run stages ----------
+def _budgeted(tools: list, budget: int) -> list:
+    """Cap total lookups across tools. Gemini can request several searches in one step,
+    so limiting agent steps alone doesn't cap searches."""
+    used = {"n": 0}
+
+    def wrap(t: Tool) -> Tool:
+        def run(query: str) -> str:
+            if used["n"] >= budget:
+                return f"Search budget of {budget} reached. Answer now using the evidence you have."
+            used["n"] += 1
+            return t.func(query)
+        return Tool(name=t.name, func=run, description=t.description)
+
+    return [wrap(t) for t in tools]
+
+
+def _tools(pending: list, lookup_budget: int | None = None) -> list:
+    sources = enabled_sources()
+    tools = []
+    if "Web" in sources:
+        tools.append(search_tool)
+    if "Wikipedia" in sources:
+        tools.append(wiki_tool)
+    if "Documents" in sources:
+        tools.append(make_documents_tool(list(st.session_state.docs.values())))
+    if lookup_budget is not None:
+        tools = _budgeted(tools, lookup_budget)
+    tools.append(make_request_save_tool(pending))
+    return tools
+
+
+def _attach_saves(pending: list, d: dict, question: str):
+    for req in pending:
+        req["dossier"] = d["id"]
+        req["question"] = question
+    st.session_state.pending_saves.extend(pending)
+
+
+# ---------- Run stages: new research ----------
 
 def _working_header(badge: str, title: str):
     st.badge(badge, color=STATUS_COLORS[badge])
@@ -454,39 +596,29 @@ def draft_plan(query: str, context: str, slot):
 
 
 def execute(query: str, steps: list[dict] | None, slot, context: str = ""):
-    """Run the agent, showing a live progress strip in `slot`, then store the report."""
+    """Start a new research session: run the agent with live progress, then store the card."""
     sources = enabled_sources()
     cfg = DEPTHS[depth()]
-    history = history_for_agent()
     pending: list = []
     counter = TokenCounter()
     result, error = None, None
-
-    tools = []
-    if "Web" in sources:
-        tools.append(search_tool)
-    if "Wikipedia" in sources:
-        tools.append(wiki_tool)
-    if "Documents" in sources:
-        tools.append(make_documents_tool(list(st.session_state.docs.values())))
-    tools.append(make_request_save_tool(pending))
 
     instructions = context + plan_to_instructions(steps)
     if cfg["instruction"]:
         instructions += f"\n\n{cfg['instruction']}"
 
+    start = time.perf_counter()
     with slot.container():
         _working_header("Researching", query)
         st.caption(" · ".join(filter(None, [
             f"Following your {len(steps)}-step plan" if steps else None, f"{depth()} depth", ", ".join(sources),
         ])))
         live = st.status(":shimmer[Planning searches...]", type="compact")
-        executor = build_agent_executor(cached_llm(), tools, max_iterations=cfg["max_iterations"],
+        executor = build_agent_executor(cached_llm(), _tools(pending), max_iterations=cfg["max_iterations"],
                                         max_execution_time=cfg["max_seconds"])
-        start = time.perf_counter()
         try:
-            result = run_research(executor, query + instructions, history,
-                                  callbacks=[LiveProgress(live), counter])
+            # A new session starts fresh: no earlier conversation is sent.
+            result = run_research(executor, query + instructions, None, callbacks=[LiveProgress(live), counter])
             if result.hit_limit:
                 error = (f"Stopped at the {depth()} depth limit before finishing. "
                          "Try again with a deeper setting or a narrower question.")
@@ -496,29 +628,153 @@ def execute(query: str, steps: list[dict] | None, slot, context: str = ""):
             error = str(e)
             live.update(label="Research failed", state="error")
 
+    seconds = time.perf_counter() - start
     add_usage(counter)
+    response = result.response if result and not error else None
+    lookups = [s for s in (result.steps if result else []) if s.tool in LOOKUP_TOOLS]
+    checks = quality_checks(response, lookups, steps)
     d = {
         "id": uuid.uuid4().hex[:8],
         "query": query,
-        "title": result.response.topic if result and result.response else query[:60],
-        "result": result,
+        "title": response.topic if response else query[:60],
+        "result": AgentResult(response, result.raw_text if result else "", lookups) if result else None,
         "error": error,
-        "seconds": time.perf_counter() - start,
-        "created": datetime.now().strftime("%H:%M"),
+        "seconds": seconds,
+        "created": now(),
+        "updated": now(),
         "fresh": True,
         "mode": mode(),
         "depth": depth(),
         "sources": sources,
-        "tokens_in": counter.input_tokens,
-        "tokens_out": counter.output_tokens,
-        "checks": quality_checks(result, steps),
+        "checks": checks,
+        "evidence": [],
+        "versions": [{"n": 1, "question": query, "route": "New research", "change": "Started new research session",
+                      "searches": len(lookups), "new_sources": len(response.sources) if response else 0,
+                      "time": now()}],
+        "last_note": None,
     }
+    _add_evidence(d, lookups)
     st.session_state.dossiers.append(d)
     st.session_state.active = len(st.session_state.dossiers) - 1
-    for req in pending:
-        req["dossier"] = d["id"]
-        req["question"] = query
-    st.session_state.pending_saves.extend(pending)
+    _attach_saves(pending, d, query)
+    log_run("New research", query, d["id"], seconds, counter, len(lookups),
+            "Failed" if error or response is None else "Complete", checks, error)
+
+
+# ---------- Run stages: follow-ups in the same session ----------
+
+def _apply_update(idx: int, question: str, new_card: ResearchResponse, new_steps: list, route: str,
+                  seconds: float, counter: TokenCounter):
+    """Store an updated card as the session's next version."""
+    d = st.session_state.dossiers[idx]
+    old = card(d)
+    _add_evidence(d, new_steps)
+    searches = len([s for s in new_steps if s.tool in LOOKUP_TOOLS and not s.output.startswith("Search budget")])
+    new_sources = max(0, len(new_card.sources) - (len(old.sources) if old else 0))
+    d["versions"].append({
+        "n": len(d["versions"]) + 1, "question": question, "route": route,
+        "change": new_card.change_summary.strip() or "Answered the follow-up",
+        "searches": searches, "new_sources": new_sources, "time": now(),
+    })
+    d["result"] = AgentResult(new_card, "", list(d["evidence"]))
+    d["updated"] = now()
+    d["fresh"] = True
+    d["last_note"] = None
+    d["checks"] = quality_checks(new_card, d["evidence"], None)
+    log_run(route, question, d["id"], seconds, counter, searches, "Complete", d["checks"])
+
+
+def _strip_followup_fields(resp) -> ResearchResponse:
+    return ResearchResponse.model_validate(
+        resp.model_dump(exclude={"evidence_sufficient", "different_topic", "missing"})
+    )
+
+
+def _no_new_sources(new_card: ResearchResponse, old: ResearchResponse | None) -> ResearchResponse:
+    """Answering from existing research runs no tools, so it can't legitimately add sources.
+    Drop any the model appended and the citations that point at them."""
+    limit = len(old.sources) if old else 0
+    if len(new_card.sources) <= limit:
+        return new_card
+    return new_card.model_copy(update={
+        "sources": new_card.sources[:limit],
+        "evidence": [e for e in new_card.evidence if 1 <= e.source_id <= limit],
+        "details": [f.model_copy(update={"source_ids": [i for i in f.source_ids if 1 <= i <= limit]})
+                    for f in new_card.details],
+    })
+
+
+def followup_from_evidence(idx: int, question: str, slot, force: bool = False):
+    """Answer a follow-up from the session's evidence pack, with no tool calls."""
+    d = st.session_state.dossiers[idx]
+    counter = TokenCounter()
+    start = time.perf_counter()
+    resp, error = None, None
+    with slot.container():
+        with st.status(":shimmer[Answering from this research...]", type="compact") as status:
+            try:
+                resp = answer_from_evidence(cached_llm(), evidence_pack(d), question, force, callbacks=[counter])
+                if resp is None:
+                    error = "The model returned no answer."
+            except Exception as e:
+                error = str(e)
+            status.update(label="Done", state="error" if error else "complete")
+    add_usage(counter)
+    seconds = time.perf_counter() - start
+    if error:
+        d["last_note"] = f"The follow-up couldn't be answered: {error}"
+        log_run("Answer from research", question, d["id"], seconds, counter, 0, "Failed", error=error)
+        return
+    if not force and (resp.different_topic or not resp.evidence_sufficient):
+        st.session_state.pending_decision = {
+            "idx": idx, "question": question, "missing": resp.missing.strip(), "different_topic": resp.different_topic,
+        }
+        log_run("Answer from research", question, d["id"], seconds, counter, 0, "Needs more research")
+        return
+    new_card = _no_new_sources(_strip_followup_fields(resp), card(d))
+    _apply_update(idx, question, new_card, [], "Answer from research", seconds, counter)
+
+
+def followup_research_further(idx: int, question: str, slot):
+    """Fetch only the missing evidence (small tool budget), then update the same card."""
+    d = st.session_state.dossiers[idx]
+    counter = TokenCounter()
+    pending: list = []
+    start = time.perf_counter()
+    result, error = None, None
+    with slot.container():
+        live = st.status(":shimmer[Looking for what's missing...]", type="compact")
+        executor = build_agent_executor(cached_llm(), _tools(pending, lookup_budget=FURTHER_MAX_LOOKUPS),
+                                        max_iterations=FURTHER_MAX_LOOKUPS + 2, max_execution_time=90)
+        try:
+            result = run_research(
+                executor, research_further_instructions(evidence_pack(d), question, FURTHER_MAX_LOOKUPS),
+                None, callbacks=[LiveProgress(live, "Updating the answer"), counter],
+            )
+            new_card = result.response
+            if new_card is None:
+                # Budget ran out before a final answer: keep what was found, answer from the evidence.
+                _add_evidence(d, result.steps)
+                live.update(label=":shimmer[Updating the answer from what was found...]")
+                resp = answer_from_evidence(cached_llm(), evidence_pack(d), question, True, callbacks=[counter])
+                new_card = _strip_followup_fields(resp) if resp else None
+            if new_card is None:
+                error = result.error or "No answer was produced."
+            live.update(label="Research failed" if error else "Updated", state="error" if error else "complete")
+        except Exception as e:
+            error = str(e)
+            live.update(label="Research failed", state="error")
+    add_usage(counter)
+    seconds = time.perf_counter() - start
+    steps = result.steps if result else []
+    _attach_saves(pending, d, question)
+    if error:
+        _add_evidence(d, steps)
+        d["last_note"] = f"Researching further didn't finish: {error}"
+        log_run("Research further", question, d["id"], seconds, counter,
+                len([s for s in steps if s.tool in LOOKUP_TOOLS]), "Failed", error=error)
+        return
+    _apply_update(idx, question, new_card, steps, "Research further", seconds, counter)
 
 
 # ---------- Components ----------
@@ -526,8 +782,8 @@ def execute(query: str, steps: list[dict] | None, slot, context: str = ""):
 COMPOSER_PLACEHOLDER = "Ask a research question..."
 
 
-def composer(disabled: bool):
-    return st.chat_input(COMPOSER_PLACEHOLDER, key="composer", submit_mode="disable",
+def composer(disabled: bool, placeholder: str = COMPOSER_PLACEHOLDER):
+    return st.chat_input(placeholder, key="composer", submit_mode="disable",
                          disabled=disabled, max_chars=2000)
 
 
@@ -542,18 +798,6 @@ def render_empty_state(disabled: bool):
     with st.container(horizontal=True, horizontal_alignment="center"):
         st.pills("Starting points", list(SUGGESTIONS), key="suggestion",
                  label_visibility="collapsed", on_change=pick_suggestion)
-    st.space("large")
-    first = {
-        "Ask first": "The agent asks a quick question or two if your request is ambiguous, "
-                     "then proposes a short plan for you to review",
-        "Review plan": "The agent proposes a short research plan for you to review",
-        "Auto-research": "The agent plans its research on its own",
-    }[mode()]
-    with st.container(border=True):
-        st.markdown("**How it works**")
-        st.markdown(f"1. {first}\n"
-                    f"2. It searches your selected sources: {', '.join(enabled_sources()) or 'none selected'}\n"
-                    "3. You get a sourced report you can explore, check and save")
     return typed
 
 
@@ -637,94 +881,170 @@ def _reveal(text: str):
     slot.markdown(text)
 
 
-def render_report(idx: int):
+def change_record(v: dict) -> str:
+    if v["route"] == "New research":
+        return f"Started new research session · {_plural(v['searches'], 'lookup')}"
+    parts = [f"Updated: {v['change'].rstrip('.')}."]
+    if v["searches"] == 0:
+        parts.append("No new searches were required.")
+    else:
+        parts.append(_plural(v["searches"], "new search") + "."
+                     + (f" Added {_plural(v['new_sources'], 'new source')}." if v["new_sources"] else ""))
+    return " ".join(parts)
+
+
+def render_report(idx: int, locked: bool = False):
+    """The session's answer card. `locked` disables every control while a follow-up runs."""
     d = st.session_state.dossiers[idx]
-    status = dossier_status(d)
+    r = card(d)
 
-    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
-        st.badge(status, color=STATUS_COLORS[status])
-        st.caption(f"{d['created']} · {d['seconds']:.0f}s · {source_count(d)} sources · {d.get('depth', 'Standard')} depth")
-
-    if d.get("error"):
-        st.title(d["query"])
-        st.error(f"The research couldn't finish: {d['error']}")
-        st.button("Try again", type="primary", on_click=queue_prompt, args=(d["query"],), key=f"retry_{idx}")
-        return
-
-    result: AgentResult = d["result"]
-    r = result.response
     if r is None:
+        st.badge("Failed", color=STATUS_COLORS["Failed"])
         st.title(d["query"])
-        st.warning("The agent replied, but not in the expected format. Here's its raw answer.")
-        st.markdown(result.raw_text)
+        if d.get("error"):
+            st.error(f"The research couldn't finish: {d['error']}")
+        elif d.get("result"):
+            st.warning("The agent replied, but not in the expected format. Here's its raw answer.")
+            st.markdown(d["result"].raw_text)
+        st.button("Try again", type="primary", on_click=queue_prompt, args=(d["query"], "New research"),
+                  key=f"retry_{idx}", disabled=locked)
         return
+
+    status = dossier_status(d)
+    v = d["versions"][-1]
+
+    # Header: answer-type chip, status if it needs attention, and actions.
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.badge(r.answer_type, color="gray")
+        if status != "Complete":
+            st.badge(status, color=STATUS_COLORS[status])
+        st.space("stretch")
+        with st.popover("Copy", type="tertiary", disabled=locked):
+            st.caption("Use the copy button in the corner.")
+            st.code(report_markdown(d["result"]), language="markdown", wrap_lines=True)
+        st.button("Save", type="tertiary", on_click=save_report, args=(idx,), key=f"save_{idx}", disabled=locked)
+        with st.popover("More", type="tertiary", disabled=locked):
+            st.download_button("Download as Markdown", data=report_markdown(d["result"]), type="tertiary",
+                               file_name=f"{r.topic[:40].strip().replace(' ', '_') or 'report'}.md",
+                               mime="text/markdown", key=f"dl_{idx}", on_click="ignore")
+            st.button("Start new research", type="tertiary", on_click=new_research, key=f"newfrom_{idx}")
 
     st.title(r.topic)
-    if d["query"].strip().lower() != r.topic.strip().lower():
-        st.caption(d["query"])
+    st.caption(f"Version {v['n']} · Updated {d['updated']} · {_plural(len(r.sources), 'source')} · "
+               f"{d.get('depth', 'Standard')} depth")
+    st.caption(f":material/history: {change_record(v)}")
+    if d.get("last_note"):
+        st.warning(d["last_note"])
 
-    if r.answer:
-        with st.container(border=True):
-            if d.pop("fresh", False):
-                _reveal(r.answer)
-            else:
-                st.markdown(r.answer)
+    st.subheader("Answer", divider="gray")
+    if d.pop("fresh", False) and "```" not in r.answer and "|" not in r.answer and not locked:
+        _reveal(r.answer)
+    else:
+        st.markdown(r.answer)
 
-    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
-        st.button("Follow up", icon=":material/reply:", key=f"follow_{idx}",
-                  on_click=prefill_composer, args=(f"Follow-up on {r.topic}: ",))
-        st.button("Save", type="tertiary", on_click=save_report, args=(idx,), key=f"save_{idx}")
-        st.download_button("Download", data=report_markdown(result), type="tertiary",
-                           file_name=f"{r.topic[:40].strip().replace(' ', '_') or 'report'}.md",
-                           mime="text/markdown", key=f"dl_{idx}", on_click="ignore")
-        with st.popover("Copy", type="tertiary"):
-            st.caption("Use the copy button in the corner.")
-            st.code(report_markdown(result), language="markdown", wrap_lines=True)
+    if r.details or r.summary:
+        st.subheader("Details", divider="gray")
+        if r.details:
+            st.markdown("\n".join(f"- {f.text} {_citations(f.source_ids, r.sources)}" for f in r.details))
+        if r.summary:
+            st.markdown(r.summary)
 
-    if r.key_findings:
-        st.subheader("Key findings")
-        for j, f in enumerate(r.key_findings):
-            with st.container(border=True):
-                st.markdown(f"{f.text} {_citations(f.source_ids, r.sources)}")
-                with st.container(horizontal=True, gap="small"):
-                    st.button("Explore", type="tertiary", key=f"explore_{idx}_{j}", on_click=queue_prompt,
-                              args=(f"Explore this further, in the context of {r.topic}: {f.text}",))
-                    st.button("Check sources", type="tertiary", key=f"check_{idx}_{j}", on_click=queue_prompt,
-                              args=(f"Check this claim against fresh sources and say whether it holds up: {f.text}",))
-                    st.button("Ask follow-up", type="tertiary", key=f"ask_{idx}_{j}", on_click=prefill_composer,
-                              args=(f"About \"{f.text[:80]}\": ",))
-
-    st.subheader("Detailed report")
-    st.markdown(r.summary)
-
-    st.subheader("Sources")
     if r.sources:
-        st.markdown("\n".join(f"{i}. {format_source(s)}" for i, s in enumerate(r.sources, 1)))
+        st.subheader("Evidence", divider="gray")
+        by_id = {e.source_id: e for e in r.evidence}
+        lines = []
+        for i, s in enumerate(r.sources, 1):
+            e = by_id.get(i)
+            title = e.title.strip() if e and e.title and e.title.strip().lower() != s.strip().lower() else ""
+            supports = e.supports.strip().rstrip(".") if e and e.supports else ""
+            extra = " · ".join(x for x in (title, supports) if x)
+            lines.append(f"{i}. {format_source(s)}" + (f" — {extra}" if extra else ""))
+        st.markdown("\n".join(lines))
         grounded = d.get("checks", {}).get("grounded")
         if grounded:
             hits, total = grounded
             st.caption(f"{hits} of {total} sources appear in the research results the agent read."
                        + ("" if hits == total else " Treat the others with care."))
-    else:
-        st.caption("No sources were cited.")
-
-    steps = result.steps
-    with st.expander(f"Research steps ({len(steps)})"):
-        if not steps:
-            st.caption("The agent answered without calling any tools.")
-        for s in steps:
+    with st.expander(f"Research steps ({len(d['evidence'])})"):
+        if not d["evidence"]:
+            st.caption("No lookups so far.")
+        for s in d["evidence"]:
             with st.expander(f"{step_name(s.tool)}: {s.tool_input[:80]}", type="step"):
                 st.text(s.output[:2000] + ("…" if len(s.output) > 2000 else ""))
 
+    st.subheader("Next steps", divider="gray")
+    with st.container(horizontal=True, gap="small"):
+        for j, step in enumerate(r.next_steps[:3]):
+            st.button(step, key=f"next_{idx}_{v['n']}_{j}", on_click=queue_prompt, args=(step,), disabled=locked)
+        st.button("Check sources", type="tertiary", key=f"check_{idx}", disabled=locked,
+                  on_click=queue_prompt, args=("Verify the main claims in this answer against fresh sources.",
+                                               "Research further"))
+        st.button("Ask follow-up", type="tertiary", key=f"ask_{idx}", disabled=locked,
+                  on_click=prefill_composer, args=(f"About {r.topic}: ",))
 
-def render_approval_notice():
+    if len(d["versions"]) > 1:
+        with st.expander(f"Change history ({len(d['versions'])} versions)"):
+            for ver in reversed(d["versions"]):
+                st.markdown(f"**Version {ver['n']}** · {ver['time']} · {ver['route']}  \n"
+                            f"{ver['question']}  \n:gray[{change_record(ver)}]")
+
+
+def render_decision_card():
+    """Shown when a follow-up can't be answered from the current evidence."""
+    dec = st.session_state.pending_decision
+    with st.container(border=True):
+        if dec["different_topic"]:
+            st.markdown("**This looks like a different topic.**")
+            st.caption(f"\"{dec['question']}\". Start a separate research session for it, "
+                       "or answer from the current research anyway.")
+        else:
+            st.markdown("**The current research doesn't cover this yet.**")
+            st.caption(f"\"{dec['question']}\"" + (f". Missing: {dec['missing']}" if dec["missing"] else ""))
+        with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+            if dec["different_topic"]:
+                st.button("Start new research", type="primary", on_click=decide, args=("new",), key="dec_new")
+                st.button("Research further here", type="tertiary", on_click=decide, args=("further",),
+                          key="dec_further")
+                st.button("Answer anyway", type="tertiary", on_click=decide, args=("anyway",), key="dec_anyway")
+            else:
+                st.button("Research further", type="primary", on_click=decide, args=("further",), key="dec_further")
+                st.button("Answer anyway", type="tertiary", on_click=decide, args=("anyway",), key="dec_anyway")
+                st.button("Start new research", type="tertiary", on_click=decide, args=("new",), key="dec_new")
+            st.space("stretch")
+            if not dec["different_topic"]:
+                st.caption(f"Research further: up to {_plural(FURTHER_MAX_LOOKUPS, 'search')}")
+
+
+def _further_estimate() -> str:
+    past = [r for r in st.session_state.runs if r["kind"] == "Research further" and r["status"] == "Complete"]
+    tokens = (sum(r["tokens_in"] + r["tokens_out"] for r in past) // len(past)) if past else 8000
+    cost = estimate_cost(int(tokens * 0.85), int(tokens * 0.15))
+    return f"Up to {_plural(FURTHER_MAX_LOOKUPS, 'search')} · ~{tokens:,} tokens" + (f" · ~${cost:.4f}" if cost else "")
+
+
+def render_followup_bar(disabled: bool = False):
+    """Follow-up mode selector, shown beside (just above) the composer when a card is open."""
+    hints = {
+        "Answer from this research": "Uses the evidence already gathered · usually 0 searches",
+        "Research further": _further_estimate(),
+        "New research": "Starts a separate research session",
+    }
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.segmented_control("Follow-up mode", FOLLOWUP_MODES, default=FOLLOWUP_MODES[0], required=True,
+                             key="followup_mode", label_visibility="collapsed", persist_state="session",
+                             disabled=disabled)
+        st.space("stretch")
+        st.caption(hints[followup_mode()])
+
+
+def render_approval_notice(disabled: bool = False):
     n = len(st.session_state.pending_saves)
     if not n:
         return
     with st.container(border=True, horizontal=True, vertical_alignment="center"):
         st.markdown(f":orange[:material/pending_actions:] **{n} file{' is' if n == 1 else 's are'} waiting for your approval**")
         st.space("stretch")
-        if st.button("Review", key="review_approvals"):
+        if st.button("Review", key="review_approvals", disabled=disabled):
             st.switch_page(APPROVALS_PAGE)
 
 
