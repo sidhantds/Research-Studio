@@ -13,6 +13,16 @@ For where the product is heading, and what is built versus planned, see
 
 ---
 
+## 15. Calmer case view
+
+Client feedback: too many boxes. The information stays; the chrome goes.
+- Six bordered metric tiles replaced by one line: title and status, a thin verdict bar, then
+  coloured counts (which double as the highlight legend).
+- Evidence column has no border: each source on one line with coloured dots for the verdicts it
+  backs, and its quote in grey italics underneath.
+- One verdict bar and one legend instead of two of each; no repeated title on the first answer.
+- "Research activity" is now a small *Activity* button beside the status line, not an expander.
+
 ## 14. Research cases survive a page refresh
 
 - **Fix:** refreshing the browser wiped every case. Each browser session now gets a random id in the

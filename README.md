@@ -68,7 +68,7 @@ The goal isn't "100% accurate". It's that **every material claim is traceable to
 
 ## Key features
 
-- **Analyst workspace, not a chat feed:** each case opens with a header showing sources, claims checked, supported, to review, conflicts and version, plus a verdict bar. Answers sit beside an **evidence panel** with every source's quote and the verdicts it backs.
+- **Analyst workspace, not a chat feed:** each case opens with its title, status, a thin verdict bar and one line of counts. Answers sit beside an **evidence column** listing every source with its quote and the verdicts it backs.
 - **Claims highlighted in the answer:** each sentence is coloured by its claim check (green supported, orange partial, red unsupported or conflicting, gray no evidence), so you can see what's verified at a glance.
 - **Claim-level verification:** each claim is *Supported*, *Partially supported*, *Unsupported* or *Insufficient evidence*. A claim is downgraded if its quote can't be found in the retrieved text.
 - **Conflicts:** passages that contradict each other are shown side by side.
