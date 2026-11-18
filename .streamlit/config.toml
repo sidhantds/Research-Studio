@@ -1,0 +1,19 @@
+# Light mode only: defining just [theme] (no [theme.dark]) removes the
+# light/dark switcher from the settings menu.
+[theme]
+base = "light"
+primaryColor = "#2563eb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6fa"
+textColor = "#1f2328"
+borderColor = "#e3e7ee"
+linkColor = "#1d4ed8"
+showWidgetBorder = true
+baseRadius = "medium"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+
+[theme.sidebar]
+backgroundColor = "#f8fafc"
+
+[client]
+toolbarMode = "minimal"

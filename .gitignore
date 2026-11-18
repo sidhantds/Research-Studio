@@ -1,0 +1,19 @@
+# Secrets - never commit
+.env
+.streamlit/secrets.toml
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Generated research output
+research_outputs/
+Research_output.txt
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

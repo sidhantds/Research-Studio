@@ -1,0 +1,12 @@
+langchain
+langchain-classic
+langchain-community
+langchain-google-genai
+langchain-openai
+langchain-anthropic
+google-genai
+wikipedia
+ddgs
+python-dotenv
+pydantic
+fastapistreamlit

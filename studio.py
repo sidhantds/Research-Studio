@@ -1,0 +1,503 @@
+"""Shared state, helpers and components for the Research Studio pages."""
+
+import os
+import re
+import threading
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+
+import streamlit as st
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.tools import Tool
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+
+from agent import (
+    PLAN_TOOLS,
+    AgentResult,
+    build_agent_executor,
+    get_llm,
+    plan_to_instructions,
+    run_research,
+)
+from tools import save_to_txt, search_tool, wiki_tool
+
+SAVE_DIR = Path("research_outputs")
+RESEARCH_PAGE = "app_pages/research.py"
+APPROVALS_PAGE = "app_pages/approvals.py"
+
+MODES = ["Review plan", "Auto-research"]
+
+STEP_NAMES = {
+    "duckduckgo_search": "Web search",
+    "wikipedia": "Wikipedia",
+    "request_save_file": "Save request",
+}
+STEP_VERBS = {
+    "duckduckgo_search": "Searching the web",
+    "wikipedia": "Reading Wikipedia",
+    "request_save_file": "Preparing a file to save",
+}
+STATUS_COLORS = {
+    "Awaiting approval": "orange",
+    "Researching": "blue",
+    "Needs approval": "orange",
+    "Complete": "green",
+    "Failed": "red",
+}
+
+SUGGESTIONS = {
+    "Solid-state batteries": "How do solid-state batteries work?",
+    "Renewable-energy trends": "What are the latest trends in renewable energy?",
+    "History of AI": "Give me a short history of artificial intelligence.",
+    "James Webb Space Telescope": "What is the James Webb Space Telescope and what has it discovered?",
+}
+
+
+# ---------- State ----------
+
+def init_state():
+    defaults = {
+        "dossiers": [],  # every research run this session
+        "active": None,  # index of the report on screen
+        "pending_plan": None,  # plan awaiting approval
+        "pending_saves": [],  # file writes awaiting approval
+        "queued_prompt": None,  # prompt queued by a button
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def mode() -> str:
+    return st.session_state.get("mode") or MODES[0]
+
+
+@st.cache_resource(show_spinner="Starting the research agent...")
+def cached_llm():
+    return get_llm()
+
+
+def has_api_key() -> bool:
+    return bool(os.getenv("GOOGLE_API_KEY"))
+
+
+# ---------- Helpers ----------
+
+def step_name(tool: str) -> str:
+    return STEP_NAMES.get(tool, tool.replace("_", " ").capitalize())
+
+
+def domain(url: str) -> str:
+    return urlparse(url).netloc.removeprefix("www.") or url
+
+
+def format_source(source: str) -> str:
+    source = source.strip()
+    if source.startswith(("http://", "https://")):
+        return f"[{domain(source)}]({source})"
+    return source
+
+
+def safe_filename(name: str) -> str:
+    name = re.sub(r"[^\w.\- ]", "_", os.path.basename(name.strip())) or "Research_output"
+    return name if name.lower().endswith(".txt") else f"{name}.txt"
+
+
+def dossier_status(d: dict) -> str:
+    if d.get("error"):
+        return "Failed"
+    if any(r.get("dossier") == d["id"] for r in st.session_state.pending_saves):
+        return "Needs approval"
+    return "Complete"
+
+
+def source_count(d: dict) -> int:
+    r = d.get("result")
+    return len(r.response.sources) if r and r.response else 0
+
+
+def report_markdown(result: AgentResult) -> str:
+    r = result.response
+    if r is None:
+        return result.raw_text
+    findings = "\n".join(f"- {f.text}" for f in r.key_findings)
+    sources = "\n".join(f"{i}. {s}" for i, s in enumerate(r.sources, 1)) or "None"
+    parts = [f"# {r.topic}", r.answer, f"## Key findings\n{findings}" if findings else "",
+             f"## Detailed report\n{r.summary}", f"## Sources\n{sources}"]
+    return "\n\n".join(p for p in parts if p) + "\n"
+
+
+def history_for_agent() -> list[tuple[str, str]]:
+    turns = []
+    for d in st.session_state.dossiers:
+        r = d.get("result")
+        if r is None:
+            continue
+        turns.append(("user", d["query"]))
+        turns.append(("assistant", (r.response.answer or r.response.summary) if r.response else r.raw_text))
+    return turns
+
+
+def scope_estimate(steps: list[dict]) -> str:
+    lookups = sum(2 if s["tool"] == "Both" else 1 for s in steps)
+    secs = 10 + 8 * lookups
+    when = "under a minute" if secs < 60 else f"about {secs // 60}–{secs // 60 + 1} minutes"
+    return f"{lookups} lookup{'s' if lookups != 1 else ''} · {when}"
+
+
+# ---------- Callbacks ----------
+
+def queue_prompt(prompt: str):
+    st.session_state.queued_prompt = prompt
+
+
+def prefill_composer(text: str):
+    st.session_state.composer = text
+
+
+def pick_suggestion():
+    choice = st.session_state.get("suggestion")
+    if choice:
+        queue_prompt(SUGGESTIONS[choice])
+    st.session_state.suggestion = None
+
+
+def new_research():
+    st.session_state.active = None
+    st.session_state.pending_plan = None
+
+
+def open_report(idx: int):
+    st.session_state.active = idx
+    st.session_state.pending_plan = None
+
+
+def clear_history():
+    st.session_state.dossiers = []
+    st.session_state.active = None
+    st.session_state.pending_plan = None
+    st.session_state.pending_saves = []
+
+
+def cancel_plan():
+    st.session_state.pending_plan = None
+
+
+def add_plan_step():
+    st.session_state.pending_plan["steps"].append(
+        {"sid": uuid.uuid4().hex[:8], "question": "", "tool": "Web", "expected": ""}
+    )
+
+
+def remove_plan_step(sid: str):
+    plan = st.session_state.pending_plan
+    plan["steps"] = [s for s in plan["steps"] if s["sid"] != sid]
+
+
+def approve_save(req_id: str):
+    req = next((r for r in st.session_state.pending_saves if r["id"] == req_id), None)
+    if not req:
+        return
+    SAVE_DIR.mkdir(exist_ok=True)
+    name = safe_filename(st.session_state.get(f"save_name_{req_id}", req["filename"]))
+    save_to_txt(req["data"], str(SAVE_DIR / name))
+    st.session_state.pending_saves.remove(req)
+    st.toast(f"Saved to {SAVE_DIR / name}", icon=":material/check_circle:")
+
+
+def skip_save(req_id: str):
+    st.session_state.pending_saves = [r for r in st.session_state.pending_saves if r["id"] != req_id]
+    st.toast("Skipped. Nothing was written.")
+
+
+def save_report(idx: int):
+    d = st.session_state.dossiers[idx]
+    SAVE_DIR.mkdir(exist_ok=True)
+    name = safe_filename(d["title"][:50].replace(" ", "_"))
+    save_to_txt(report_markdown(d["result"]), str(SAVE_DIR / name))
+    st.toast(f"Saved to {SAVE_DIR / name}", icon=":material/check_circle:")
+
+
+# ---------- Live progress ----------
+
+class LiveProgress(BaseCallbackHandler):
+    """Turns tool calls into a one-line progress strip, with details on demand."""
+
+    run_inline = True
+
+    def __init__(self, status):
+        self.status = status
+        self.ctx = get_script_run_ctx()
+        self.done: dict[str, int] = {}
+        self.current = None
+
+    def _attach(self):
+        if get_script_run_ctx() is None and self.ctx is not None:
+            add_script_run_ctx(threading.current_thread(), self.ctx)
+
+    def _label(self, doing: str) -> str:
+        done = " · ".join(f"✓ {n}" + (f" ×{c}" if c > 1 else "") for n, c in self.done.items())
+        return f"{done} · :shimmer[{doing}...]" if done else f":shimmer[{doing}...]"
+
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        self._attach()
+        name = (serialized or {}).get("name") or kwargs.get("name", "tool")
+        self.status.update(label=self._label(STEP_VERBS.get(name, f"Running {step_name(name)}")))
+        query = str(input_str)
+        with self.status:
+            self.current = (name, st.status(f"{step_name(name)}: {query[:80]}", type="step"))
+
+    def on_tool_end(self, output, **kwargs):
+        self._attach()
+        if self.current is None:
+            return
+        name, step = self.current
+        text = str(getattr(output, "content", output))
+        with step:
+            st.caption(text[:300] + ("…" if len(text) > 300 else ""))
+        step.update(state="error" if " failed (" in text[:60] else "complete")
+        self.done[step_name(name)] = self.done.get(step_name(name), 0) + 1
+        self.status.update(label=self._label("Drafting report"))
+        self.current = None
+
+    def on_tool_error(self, error, **kwargs):
+        self._attach()
+        if self.current is not None:
+            self.current[1].update(state="error")
+            self.current = None
+
+
+def make_request_save_tool(pending: list) -> Tool:
+    """Side-effect guardrail: the agent can only request a save; the user approves it."""
+
+    def request_save(text: str) -> str:
+        pending.append({"id": uuid.uuid4().hex[:8], "data": text, "filename": "Research_output.txt"})
+        return "Save request sent to the user for approval. Do not call this again; continue with your answer."
+
+    return Tool(
+        name="request_save_file",
+        func=request_save,
+        description="Save research text to a file. Only use when the user asks to save something. "
+        "The user must approve before anything is written. Input: the full text to save.",
+    )
+
+
+def execute(query: str, steps: list[dict] | None, slot):
+    """Run the agent, showing a live progress strip in `slot`, then store the report."""
+    history = history_for_agent()
+    pending: list = []
+    result, error = None, None
+    with slot.container():
+        st.badge("Researching", color=STATUS_COLORS["Researching"])
+        st.title(query)
+        if steps:
+            st.caption(f"Following your {len(steps)}-step plan")
+        live = st.status(":shimmer[Planning searches...]", type="compact")
+        tools = [search_tool, wiki_tool, make_request_save_tool(pending)]
+        executor = build_agent_executor(cached_llm(), tools)
+        start = time.perf_counter()
+        try:
+            result = run_research(executor, query + plan_to_instructions(steps), history,
+                                  callbacks=[LiveProgress(live)])
+            live.update(label="Research complete", state="complete")
+        except Exception as e:
+            error = str(e)
+            live.update(label="Research failed", state="error")
+
+    d = {
+        "id": uuid.uuid4().hex[:8],
+        "query": query,
+        "title": result.response.topic if result and result.response else query[:60],
+        "result": result,
+        "error": error,
+        "seconds": time.perf_counter() - start,
+        "created": datetime.now().strftime("%H:%M"),
+        "fresh": True,
+    }
+    st.session_state.dossiers.append(d)
+    st.session_state.active = len(st.session_state.dossiers) - 1
+    for req in pending:
+        req["dossier"] = d["id"]
+        req["question"] = query
+    st.session_state.pending_saves.extend(pending)
+
+
+# ---------- Components ----------
+
+def render_empty_state():
+    st.title("What should I research?")
+    st.markdown("Ask any question in the box below, or start with one of these:")
+    st.pills("Starting points", list(SUGGESTIONS), key="suggestion",
+             label_visibility="collapsed", on_change=pick_suggestion)
+    st.space("medium")
+    with st.container(border=True):
+        st.markdown("**How it works**")
+        if mode() == "Review plan":
+            st.markdown("1. The agent proposes a short research plan for you to review\n"
+                        "2. It searches the sources you approved\n"
+                        "3. You get a sourced report you can explore, check and save")
+        else:
+            st.markdown("1. The agent plans and searches on its own\n"
+                        "2. You watch its progress live\n"
+                        "3. You get a sourced report you can explore, check and save")
+
+
+def render_plan_card():
+    """Returns (query, steps) once the user approves the plan."""
+    plan = st.session_state.pending_plan
+    st.badge("Awaiting approval", color=STATUS_COLORS["Awaiting approval"])
+    st.title(plan["query"])
+    st.caption("Here's how I'd research this. Adjust anything, then start.")
+
+    current = []
+    for n, s in enumerate(plan["steps"], 1):
+        with st.container(border=True):
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.markdown(f"**Step {n}**")
+                st.space("stretch")
+                st.button("Remove", type="tertiary", key=f"del_{s['sid']}",
+                          help=f"Remove step {n}", on_click=remove_plan_step, args=(s["sid"],))
+            q = st.text_input(f"Step {n} question", value=s["question"], key=f"q_{s['sid']}",
+                              label_visibility="collapsed", placeholder="What should this step find out?",
+                              persist_state="session")
+            tool = st.segmented_control(f"Step {n} source", PLAN_TOOLS, default=s["tool"], required=True,
+                                        key=f"tool_{s['sid']}", persist_state="session")
+            if s.get("expected"):
+                st.caption(f"Looking for: {s['expected']}")
+            current.append({"question": (q or "").strip(), "tool": tool or "Web"})
+
+    steps = [s for s in current if s["question"]]
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        approved = st.button("Approve and run", type="primary", disabled=not steps,
+                             key=f"approve_{plan['id']}")
+        st.button("Add step", type="tertiary", icon=":material/add:", on_click=add_plan_step,
+                  key=f"add_{plan['id']}")
+        st.space("stretch")
+        st.caption(scope_estimate(steps) if steps else "Add at least one step")
+        st.button("Cancel", type="tertiary", on_click=cancel_plan, key=f"cancel_{plan['id']}")
+    return (plan["query"], steps) if approved else None
+
+
+def _citations(ids: list[int], sources: list[str]) -> str:
+    marks = []
+    for i in ids:
+        if 1 <= i <= len(sources):
+            src = sources[i - 1].strip()
+            marks.append(f"[\\[{i}\\]]({src})" if src.startswith("http") else f"\\[{i}\\]")
+    return " ".join(marks)
+
+
+def _reveal(text: str):
+    """Word-by-word reveal. (st.write_stream imports pandas, which this machine blocks.)"""
+    slot = st.empty()
+    shown = ""
+    for word in text.split(" "):
+        shown += word + " "
+        slot.markdown(shown + "▌")
+        time.sleep(0.02)
+    slot.markdown(text)
+
+
+def render_report(idx: int):
+    d = st.session_state.dossiers[idx]
+    status = dossier_status(d)
+
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.badge(status, color=STATUS_COLORS[status])
+        st.caption(f"{d['created']} · {d['seconds']:.0f}s · {source_count(d)} sources")
+
+    if d.get("error"):
+        st.title(d["query"])
+        st.error(f"The research couldn't finish: {d['error']}")
+        st.button("Try again", type="primary", on_click=queue_prompt, args=(d["query"],), key=f"retry_{idx}")
+        return
+
+    result: AgentResult = d["result"]
+    r = result.response
+    if r is None:
+        st.title(d["query"])
+        st.warning("The agent replied, but not in the expected format. Here's its raw answer.")
+        st.markdown(result.raw_text)
+        return
+
+    st.title(r.topic)
+    if d["query"].strip().lower() != r.topic.strip().lower():
+        st.caption(d["query"])
+
+    if r.answer:
+        with st.container(border=True):
+            if d.pop("fresh", False):
+                _reveal(r.answer)
+            else:
+                st.markdown(r.answer)
+
+    # Actions, grouped by intent: follow-up is secondary, the rest tertiary.
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.button("Follow up", icon=":material/reply:", key=f"follow_{idx}",
+                  on_click=prefill_composer, args=(f"Follow-up on {r.topic}: ",))
+        st.button("Save", type="tertiary", on_click=save_report, args=(idx,), key=f"save_{idx}")
+        st.download_button("Download", data=report_markdown(result), type="tertiary",
+                           file_name=f"{r.topic[:40].strip().replace(' ', '_') or 'report'}.md",
+                           mime="text/markdown", key=f"dl_{idx}", on_click="ignore")
+        with st.popover("Copy", type="tertiary"):
+            st.caption("Use the copy button in the corner.")
+            st.code(report_markdown(result), language="markdown", wrap_lines=True)
+
+    if r.key_findings:
+        st.subheader("Key findings")
+        for j, f in enumerate(r.key_findings):
+            with st.container(border=True):
+                st.markdown(f"{f.text} {_citations(f.source_ids, r.sources)}")
+                with st.container(horizontal=True, gap="small"):
+                    st.button("Explore", type="tertiary", key=f"explore_{idx}_{j}", on_click=queue_prompt,
+                              args=(f"Explore this further, in the context of {r.topic}: {f.text}",))
+                    st.button("Check sources", type="tertiary", key=f"check_{idx}_{j}", on_click=queue_prompt,
+                              args=(f"Check this claim against fresh sources and say whether it holds up: {f.text}",))
+                    st.button("Ask follow-up", type="tertiary", key=f"ask_{idx}_{j}", on_click=prefill_composer,
+                              args=(f"About \"{f.text[:80]}\": ",))
+
+    st.subheader("Detailed report")
+    st.markdown(r.summary)
+
+    st.subheader("Sources")
+    if r.sources:
+        st.markdown("\n".join(f"{i}. {format_source(s)}" for i, s in enumerate(r.sources, 1)))
+    else:
+        st.caption("No sources were cited.")
+
+    steps = result.steps
+    with st.expander(f"Research steps ({len(steps)})"):
+        if not steps:
+            st.caption("The agent answered without calling any tools.")
+        for s in steps:
+            with st.expander(f"{step_name(s.tool)}: {s.tool_input[:80]}", type="step"):
+                st.text(s.output[:2000] + ("…" if len(s.output) > 2000 else ""))
+
+
+def render_approval_notice():
+    n = len(st.session_state.pending_saves)
+    if not n:
+        return
+    with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        st.markdown(f":orange[:material/pending_actions:] **{n} file{' is' if n == 1 else 's are'} waiting for your approval**")
+        st.space("stretch")
+        if st.button("Review", key="review_approvals"):
+            st.switch_page(APPROVALS_PAGE)
+
+
+def render_saved_files():
+    files = sorted(SAVE_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True) if SAVE_DIR.exists() else []
+    if not files:
+        st.caption("Nothing saved yet. Use **Save** on a report, or approve a save request from the agent.")
+        return
+    for i, f in enumerate(files):
+        stat = f.stat()
+        when = datetime.fromtimestamp(stat.st_mtime).strftime("%b %d, %H:%M")
+        with st.expander(f"{f.name} · {stat.st_size / 1024:.1f} KB · {when}"):
+            text = f.read_text(encoding="utf-8", errors="replace")
+            st.text(text[:3000] + ("…" if len(text) > 3000 else ""))
+            st.download_button("Download", data=text, file_name=f.name, mime="text/plain",
+                               type="tertiary", key=f"dlfile_{i}", on_click="ignore")
