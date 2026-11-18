@@ -13,7 +13,7 @@ For where the product is heading, and what is built versus planned, see
 
 ---
 
-## 11. Intent routing, one answer schema, follow-ups in the same session — *not yet committed*
+## 11. Intent routing, one answer schema, follow-ups in the same session — `2e7b3a9`
 
 **Intent router** (`agent.py`)
 - Before anything runs, each request gets a `Route`: `response_type` (code, explanation, research,
@@ -89,7 +89,7 @@ For where the product is heading, and what is built versus planned, see
 
 ---
 
-## 10. Research cases: claim-level evidence, review and audit — *not yet committed*
+## 10. Research cases: claim-level evidence, review and audit — `2e7b3a9`
 
 **Claims with quoted evidence**
 - After every answer, a **separate** model call splits it into claims (up to 8). For each claim
