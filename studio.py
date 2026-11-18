@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 import streamlit as st
 from langchain_core.callbacks import BaseCallbackHandler
+
+import persistence
 from langchain_core.tools import Tool
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
@@ -133,7 +135,36 @@ def _fresh_research_state() -> dict:
     return {"active": None, "pending_plan": None, "pending_clarify": None, "pending_decision": None}
 
 
+def _restore_from_disk():
+    """Once per browser session: take the session id from the URL (or make one) and reload
+    any cases saved under it, so a refresh brings everything back."""
+    if "sid" not in st.session_state:
+        sid = st.query_params.get("sid")
+        if not persistence.valid_sid(sid):
+            sid = uuid.uuid4().hex
+        st.session_state.sid = sid
+        saved = persistence.load(sid)
+        if saved:
+            for k, v in saved.items():
+                st.session_state[k] = v
+    if st.query_params.get("sid") != st.session_state.sid:  # page switches drop query params
+        st.query_params["sid"] = st.session_state.sid
+
+
+def save_to_disk():
+    """Called at the end of every run. Failures never break the app; the case just isn't saved."""
+    if "sid" not in st.session_state:
+        return
+    try:
+        persistence.save(st.session_state.sid, {k: st.session_state[k] for k in persistence.PERSISTED_KEYS
+                                                if k in st.session_state})
+    except Exception as e:  # noqa: BLE001 - e.g. a read-only disk
+        st.toast(f"Couldn't save this session ({type(e).__name__}). It will be lost on refresh.",
+                 icon=":material/warning:")
+
+
 def init_state():
+    _restore_from_disk()
     defaults = {
         "dossiers": [],  # research sessions (cases)
         "runs": [],  # every model run (new research and follow-ups), for Runs & quality

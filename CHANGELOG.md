@@ -13,6 +13,16 @@ For where the product is heading, and what is built versus planned, see
 
 ---
 
+## 14. Research cases survive a page refresh
+
+- **Fix:** refreshing the browser wiped every case. Each browser session now gets a random id in the
+  URL (`?sid=…`); cases, runs, saved files and usage are written to `.sessions/<sid>.json` after
+  every run (also when a page ends in `st.rerun()`), and read back on refresh. Page switches keep
+  the id.
+- JSON, not pickle, and only 32-character hex ids are accepted, so a crafted URL can't read other
+  files. Writes go to a temp file first, so a crash never leaves a half-written session.
+- `persistence.py` (no Streamlit dependency) with 12 new tests (78 in total).
+
 ## 13. Analyst workspace UI
 
 - **Case-first header:** the case title, status, and metric tiles (sources, claims checked, supported,

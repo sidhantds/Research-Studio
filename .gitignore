@@ -17,3 +17,6 @@ Research_output.txt
 .idea/
 .DS_Store
 Thumbs.db
+
+# Saved browser sessions (research cases survive a refresh)
+.sessions/

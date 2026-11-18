@@ -9,7 +9,9 @@ import os
 import streamlit as st
 
 import agent
+import checks
 import evidence
+import persistence
 import studio
 import tools
 
@@ -20,10 +22,10 @@ def _reload_changed_modules():
     Streamlit reruns this script on every interaction but keeps imported modules in memory.
     After a code update (a git push to Streamlit Cloud, or an edit while running locally),
     the new app.py could otherwise run against the old studio.py and crash. Reloads go in
-    dependency order (tools -> evidence -> agent -> studio) so each picks up the fresh version below it.
+    dependency order (tools -> evidence -> agent -> checks -> persistence -> studio) so each picks up the fresh version below it.
     """
     changed = False
-    for mod in (tools, evidence, agent, studio):
+    for mod in (tools, evidence, agent, checks, persistence, studio):
         path = str(mod.__file__)
         mtime = os.path.getmtime(path)
         # No timestamp yet means the module was imported by code from before this guard
@@ -118,4 +120,9 @@ with st.sidebar:
         st.button("Clear history", type="tertiary", on_click=s.clear_history,
                   disabled=not st.session_state.dossiers, key="clear_history")
 
-page.run()
+# Save after every run, even when the page ends with st.rerun() or st.stop(),
+# so a browser refresh brings the cases back.
+try:
+    page.run()
+finally:
+    s.save_to_disk()

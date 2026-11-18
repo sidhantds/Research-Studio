@@ -189,7 +189,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-66 unit tests cover routing, quote matching, claim downgrades, citation renumbering, source rules, JSON repair, evidence compression and claim highlighting. They run offline in under a second.
+78 unit tests cover routing, quote matching, claim downgrades, citation renumbering, source rules, JSON repair, evidence compression, claim highlighting and session saving. They run offline in under a second.
 
 ### Live checks
 
@@ -212,7 +212,8 @@ Each run's trace records the timestamp, step, lookups, context size, tokens, mod
 - **Quotes checked in code:** the model never grades its own citations unchecked. Quotes it invents are caught and the claim is downgraded.
 - **Source rules enforced in code:** denied domains are filtered out of results, not just discouraged in the prompt.
 - **Human in the loop:** flagged claims stay in review until you decide on them.
-- **Your key, your data:** cases and saved files live in each visitor's browser session. On a public deploy, every visitor uses your API key, so make the app private under **Settings → Sharing**.
+- **Sessions survive a refresh:** each browser session has a random id in the URL (`?sid=…`), and its cases are saved as JSON (never pickle, so loading a file can't run code) in `.sessions/`. Only 32-character hex ids are accepted, so a crafted URL can't read other files. Anyone with the URL can open that session, like an unlisted link.
+- **Your key:** on a public deploy, every visitor uses your API key, so make the app private under **Settings → Sharing**.
 
 ## Project structure
 
@@ -222,10 +223,11 @@ app_pages/        research · library · approvals · runs
 studio.py         sessions, research runs, answer card, case file, export
 agent.py          router, Answer schema, prompts, agent, planner, claim checker
 checks.py         quote matching, claim downgrades, answer cleaning, quality checks
+persistence.py    saves cases so a refresh keeps them
 evidence.py       evidence items and compact follow-up context
 tools.py          web search, Wikipedia, documents, source rules
 main.py           CLI (read-only tools)
-tests/            66 offline unit tests
+tests/            78 offline unit tests
 evals/            labeled routing and quote cases + runner
 assets/           README images
 ```
@@ -251,7 +253,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 
-- Cases live in the browser session. Export the audit report to keep one.
+- Cases survive refreshes, but on Streamlit Community Cloud the saved files are wiped when the app restarts. Export the audit report to keep a case for good. There are no user accounts yet.
 - There's no recency filter. It was removed because search engines only treat dates as a hint.
 - The audit export is Markdown only for now.
 - Claim checks add one model call per answer (code answers skip it).
