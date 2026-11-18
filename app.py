@@ -25,7 +25,9 @@ def _reload_changed_modules():
     for mod in (tools, agent, studio):
         path = str(mod.__file__)
         mtime = os.path.getmtime(path)
-        if changed or getattr(mod, "_loaded_mtime", mtime) != mtime:
+        # No timestamp yet means the module was imported by code from before this guard
+        # existed (or the process just started): reload once to be sure it's current.
+        if changed or getattr(mod, "_loaded_mtime", None) != mtime:
             importlib.reload(mod)
             changed = True  # modules that import this one must reload too
         setattr(mod, "_loaded_mtime", os.path.getmtime(path))
