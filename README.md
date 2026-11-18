@@ -80,7 +80,7 @@ Ask  →  Review plan  →  Watch research  →  Read and act on the report
    - Wikipedia
    - A save request that goes to the approval queue
 3. **Stream.** A LangChain callback handler turns each tool call into a live progress update in the UI.
-4. **Report.** The agent's answer is parsed into a Pydantic `ResearchResponse` (topic, answer, key findings with source IDs, summary, sources). If the model's output isn't valid JSON, the parser pulls the JSON out of the reply. If that fails, it asks the model once to convert its answer into the schema.
+4. **Answer.** Every answer, whether code, explanation, research, comparison or fact check, is parsed into one Pydantic `Answer` envelope (`response_type`, `title`, `direct_answer`, `details`, `code`, `comparison`, `verdict`, `sources`, `follow_ups`). It renders as one standard card. If the model's output isn't valid JSON, the parser pulls the JSON out of the reply. If that fails, it asks the model once to convert its answer into the schema.
 
 Tool failures, such as a search timeout, are returned to the agent as messages instead of exceptions, so it can fall back to another source.
 

@@ -48,7 +48,7 @@ _ENGINE_TIMEOUT = 8
 _SEARCH_BUDGET_SECONDS = 25
 
 
-def _fetch_web(query: str) -> str:
+def _fetch_web(query: str, timelimit: str | None = None) -> str:
     from ddgs import DDGS
 
     started, errors = time.monotonic(), []
@@ -56,7 +56,8 @@ def _fetch_web(query: str) -> str:
         if time.monotonic() - started > _SEARCH_BUDGET_SECONDS:
             break
         try:
-            results = DDGS(timeout=_ENGINE_TIMEOUT).text(query, backend=engine, max_results=4)
+            results = DDGS(timeout=_ENGINE_TIMEOUT).text(query, backend=engine, max_results=6 if timelimit else 4,
+                                                         timelimit=timelimit)
         except Exception as e:
             errors.append(f"{engine}: {type(e).__name__}")
             continue
@@ -122,6 +123,80 @@ wiki_tool = Tool(
     func=_safe_wiki,
     description=_wiki.description,
 )
+
+# ---------- Source rules (allowlist, denylist, recency) ----------
+# Enforced here, in code, on every result, so a rule can't be ignored by the model.
+
+RECENCY = {"Any time": None, "Past year": "y", "Past month": "m", "Past week": "w"}
+
+
+def parse_domains(text: str) -> list[str]:
+    """'nasa.gov, .edu  arxiv.org' -> ['nasa.gov', 'edu', 'arxiv.org']"""
+    out = []
+    for part in re.split(r"[\s,;]+", text or ""):
+        part = re.sub(r"^https?://", "", part.strip().lower()).strip("./").removeprefix("www.")
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+def _host(url: str) -> str:
+    return re.sub(r"^https?://", "", url.strip().lower()).split("/")[0].removeprefix("www.")
+
+
+def domain_allowed(url: str, allow: list[str], deny: list[str]) -> bool:
+    """A domain rule matches the domain itself and its subdomains; 'gov' matches every .gov site."""
+    host = _host(url)
+    match = lambda rule: host == rule or host.endswith("." + rule)  # noqa: E731
+    if any(match(r) for r in deny):
+        return False
+    return not allow or any(match(r) for r in allow)
+
+
+def _filter_blocks(text: str, allow: list[str], deny: list[str]) -> tuple[str, int]:
+    """Drop result blocks whose URL breaks the rules. Returns (kept text, number dropped)."""
+    kept, dropped = [], 0
+    for block in text.split("\n\n"):
+        m = re.search(r"^URL: (\S+)", block, re.M)
+        if m and not domain_allowed(m.group(1), allow, deny):
+            dropped += 1
+        else:
+            kept.append(block)
+    return "\n\n".join(kept), dropped
+
+
+def make_search_tool(allow: list[str], deny: list[str], recency: str = "Any time") -> Tool:
+    """Web search that only returns results from allowed domains (and within the recency window)."""
+    timelimit = RECENCY.get(recency)
+    if not allow and not deny and not timelimit:
+        return search_tool
+
+    def search(query: str) -> str:
+        q = query
+        if allow and len(allow) <= 3:  # steer the engine too; the filter below is what enforces it
+            q += " " + " OR ".join(f"site:{d}" for d in allow)
+        try:
+            text = _cached(f"web:{timelimit}", q, lambda x: _fetch_web(x, timelimit))
+        except Exception as e:
+            return f"Web search failed ({type(e).__name__}). Try a different query. Don't fill gaps from memory."
+        kept, dropped = _filter_blocks(text, allow, deny)
+        if not kept.strip():
+            return (f"No results from allowed sources ({', '.join(allow) or 'any'}; blocked: "
+                    f"{', '.join(deny) or 'none'}). Try a different query, or report the gap. "
+                    "Don't fill gaps from memory.")
+        return kept + (f"\n\n({dropped} result(s) removed by the source rules.)" if dropped else "")
+
+    return Tool(name=search_tool.name, func=search,
+                description=search_tool.description
+                + (f" Only results from: {', '.join(allow)}." if allow else "")
+                + (f" Limited to the {recency.lower()}." if timelimit else ""))
+
+
+def make_wiki_tool(allow: list[str], deny: list[str]) -> Tool | None:
+    """Wikipedia, unless the source rules exclude wikipedia.org (then None)."""
+    if not domain_allowed("https://en.wikipedia.org", allow, deny):
+        return None
+    return wiki_tool
 
 # ---------- Uploaded documents ----------
 

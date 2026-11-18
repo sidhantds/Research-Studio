@@ -9,6 +9,7 @@ import os
 import streamlit as st
 
 import agent
+import evidence
 import studio
 import tools
 
@@ -19,10 +20,10 @@ def _reload_changed_modules():
     Streamlit reruns this script on every interaction but keeps imported modules in memory.
     After a code update (a git push to Streamlit Cloud, or an edit while running locally),
     the new app.py could otherwise run against the old studio.py and crash. Reloads go in
-    dependency order (tools -> agent -> studio) so each picks up the fresh version below it.
+    dependency order (tools -> evidence -> agent -> studio) so each picks up the fresh version below it.
     """
     changed = False
-    for mod in (tools, agent, studio):
+    for mod in (tools, evidence, agent, studio):
         path = str(mod.__file__)
         mtime = os.path.getmtime(path)
         # No timestamp yet means the module was imported by code from before this guard
@@ -91,10 +92,22 @@ with st.sidebar:
                          disabled=busy, help="Quick: 1-2 lookups. Standard: 2-4, cross-checked. "
                                              "Deep: 4-8 across sources.")
 
+    rules = s.rules_summary()
+    if rules:
+        st.caption(f":material/rule: Source rules: {rules}")
+
     st.space("stretch")
     with st.popover("Settings", icon=":material/settings:", width="stretch", disabled=busy):
         st.radio("Before researching", s.MODES, index=s.MODES.index("Auto-research"), key="mode",
                  captions=s.MODE_CAPTIONS)
+        st.divider()
+        st.markdown("**Source rules**")
+        st.caption("Enforced on every search result, not just suggested to the agent.")
+        st.text_input("Only use these domains", key="rule_allow", placeholder="e.g. nasa.gov, .edu, arxiv.org",
+                      help="Leave empty to allow any site. 'gov' matches every .gov site.")
+        st.text_input("Never use these domains", key="rule_deny", placeholder="e.g. reddit.com, quora.com")
+        st.segmented_control("Recency", list(tools.RECENCY), default="Any time", required=True, key="rule_recency",
+                             help="Asks the search engines to filter by date. Wikipedia isn't date-filtered.")
         st.divider()
         usage = st.session_state.usage
         cost = s.estimate_cost(usage["input"], usage["output"])

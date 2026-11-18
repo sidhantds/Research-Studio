@@ -1,9 +1,13 @@
 """Shared state, helpers and components for the Research Studio pages.
 
-A research *session* (stored in st.session_state.dossiers) starts with one question and
-keeps one answer card. Follow-ups update that card as a new version instead of starting
-over. Each session keeps the tool results it has gathered as an evidence pack, so most
-follow-ups are answered without searching again.
+The central object is a research *case* (stored in st.session_state.dossiers): a thread of
+questions and answers plus everything needed to audit it: the plan versions that drove it,
+the evidence the agent retrieved, every claim with the passage that supports it and a
+verdict, the user's review decisions, and a run trace. Chat is just how you work on a case.
+
+A session keeps one stable id (its thread_id) for its whole life. Follow-ups never start a new
+session: they're answered from the session's structured evidence by default, and only search
+when the user picks "Research further". Each new answer is a new message and bumps the version.
 """
 
 import io
@@ -21,9 +25,18 @@ from langchain_core.tools import Tool
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from agent import (
-    ResearchResponse,
+    MODEL_NAME,
+    PROMPT_VERSION,
+    Answer,
+    Route,
+    RunContext,
+    Source,
     TokenCounter,
-    answer_from_evidence,
+    answer_direct,
+    answer_from_session,
+    check_claims,
+    route_request,
+    typed_request,
     build_agent_executor,
     get_llm,
     make_clarifying_questions,
@@ -32,7 +45,8 @@ from agent import (
     research_further_instructions,
     run_research,
 )
-from tools import make_documents_tool, search_tool, wiki_tool
+from evidence import PACK_ITEMS, build_pack, compress_step
+from tools import make_documents_tool, make_search_tool, make_wiki_tool, parse_domains
 
 RESEARCH_PAGE = "app_pages/research.py"
 APPROVALS_PAGE = "app_pages/approvals.py"
@@ -44,8 +58,22 @@ MODE_CAPTIONS = [
     "Plan and research without stopping",
 ]
 
-FURTHER_MAX_LOOKUPS = 2  # search budget when a follow-up needs evidence the session doesn't have
-EVIDENCE_PACK_CHARS = 6000  # cap on stored snippets sent with each follow-up
+FURTHER_MAX_LOOKUPS = 2  # search budget for "Research further"
+
+# Follow-ups default to the current research; searching is always the user's choice.
+FOLLOWUP_MODES = ["Use current research", "Research further", "New research"]
+FOLLOWUP_HELP = ("Use current research: answer from what this session already found (no searching). "
+                 f"Research further: up to {FURTHER_MAX_LOOKUPS} new searches in this session. "
+                 "New research: start a separate research case.")
+
+TYPE_LABELS = {"code": "Code", "explanation": "Explanation", "research": "Research",
+               "comparison": "Comparison", "fact_check": "Fact check", "clarification": "Clarification"}
+TYPE_COLORS = {"code": "violet", "explanation": "gray", "research": "blue", "comparison": "blue",
+               "fact_check": "orange"}
+CONTEXT_LABELS = {"answer_from_session": "from current research", "research_further": "needs a few new facts",
+                  "new_research": "new topic"}
+VERDICT_LABELS = {"supported": ("Supported", "green"), "partially_supported": ("Partially supported", "orange"),
+                  "unsupported": ("Unsupported", "red"), "uncertain": ("Uncertain", "gray")}
 
 DEPTHS = {
     "Quick": {"steps": "1 to 2", "max_iterations": 6, "max_seconds": 60,
@@ -82,9 +110,13 @@ STATUS_COLORS = {
     "Drafting plan": "gray",
     "Researching": "gray",
     "Needs approval": "orange",
+    "Needs review": "orange",
     "Complete": "green",
     "Failed": "red",
 }
+
+VERDICT_COLORS = {"Supported": "green", "Partially supported": "orange", "Unsupported": "red",
+                  "Insufficient evidence": "gray"}
 
 SUGGESTIONS = {
     "Solid-state batteries": "How do solid-state batteries work?",
@@ -102,7 +134,7 @@ def _fresh_research_state() -> dict:
 
 def init_state():
     defaults = {
-        "dossiers": [],  # research sessions
+        "dossiers": [],  # research sessions (cases)
         "runs": [],  # every model run (new research and follow-ups), for Runs & quality
         **_fresh_research_state(),
         "pending_saves": [],  # file writes awaiting approval
@@ -113,6 +145,7 @@ def init_state():
         "saved_files": [],
         "docs": {},  # uploaded documents: key -> {"name", "text"}
         "usage": {"input": 0, "output": 0},  # tokens across every model call
+        "followup_mode": FOLLOWUP_MODES[0],  # "Use current research": searching is always a choice
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -120,21 +153,55 @@ def init_state():
     _migrate_old_sessions()
 
 
+def _as_answer(c):
+    """Bring any stored answer up to the current Answer class (after an app update)."""
+    if c is None or type(c) is Answer:
+        return c
+    if hasattr(c, "direct_answer"):  # an Answer from before a module reload
+        return Answer.model_validate(c.model_dump())
+    label = (getattr(c, "answer_type", "") or "").lower()  # the old research-report format
+    rtype = "code" if "code" in label else "comparison" if "compar" in label else "research"
+    srcs = [Source(id=str(i), url=s, title=domain(s) if s.startswith("http") else s)
+            for i, s in enumerate(getattr(c, "sources", []) or [], 1)]
+    text = c.answer + (f"\n\n{c.summary}" if getattr(c, "summary", "") else "")
+    return Answer(response_type=rtype, title=getattr(c, "topic", ""), direct_answer=text,
+                  details=[f.text for f in getattr(c, "details", [])], sources=srcs,
+                  follow_ups=list(getattr(c, "next_steps", []) or []))
+
+
+_OLD_ROUTES = {"New research": "new_research", "Answer from research": "answer_from_session",
+               "Research further": "research_further", "Direct answer": "direct"}
+
+
 def _migrate_old_sessions():
-    """Convert sessions saved by the earlier one-card-per-session format into threads,
-    so an open browser tab survives an app update."""
+    """Convert sessions stored by earlier versions, so an open browser tab survives an app update."""
     for d in st.session_state.dossiers:
-        if "turns" in d:
-            continue
-        r = d.get("result")
-        c = r.response if r else None
-        d["turns"] = [{"question": d.get("query", ""), "route": "New research", "card": c,
-                       "error": d.get("error"), "raw": r.raw_text if r else "", "time": d.get("created", ""),
-                       "seconds": d.get("seconds", 0), "searches": len(d.get("evidence", [])),
-                       "new_sources": len(c.sources) if c else 0, "checks": d.get("checks", {}), "fresh": False}]
+        if "turns" not in d:
+            r = d.get("result")
+            c = r.response if r else None
+            d["turns"] = [{"question": d.get("query", ""), "route": "New research", "card": c,
+                           "error": d.get("error"), "raw": r.raw_text if r else "", "time": d.get("created", ""),
+                           "seconds": d.get("seconds", 0), "searches": len(d.get("evidence", [])),
+                           "new_sources": 0, "checks": d.get("checks", {}), "fresh": False}]
+            d.setdefault("updated", d.get("created", ""))
         d.setdefault("evidence", [])
-        d["sources"] = list(c.sources) if c else []
-        d.setdefault("updated", d.get("created", ""))
+        for t in d["turns"]:
+            t["card"] = _as_answer(t["card"])
+            t.setdefault("context_mode", _OLD_ROUTES.get(t.get("route"), "new_research"))
+            t.setdefault("claims", [])
+        if d.get("sources") and isinstance(d["sources"][0], str):
+            d["sources"] = [{"id": f"S{i}", "title": domain(s) if s.startswith("http") else s,
+                             "url": s if s.startswith("http") else None,
+                             "domain": domain(s) if s.startswith("http") else s}
+                            for i, s in enumerate(d["sources"], 1)]
+        d.setdefault("sources", [])
+        if "evidence_items" not in d:
+            d["evidence_items"], d["retrieved"] = [], []
+            for s in d["evidence"]:
+                compress_step(s.tool, s.tool_input, s.output, d.get("query", ""), d["retrieved"], d["evidence_items"])
+        d.setdefault("thread_id", d["id"])
+        d.setdefault("version", sum(t["card"] is not None for t in d["turns"]))
+        d.setdefault("search_budget", FURTHER_MAX_LOOKUPS)
 
 
 def mode() -> str:
@@ -149,6 +216,37 @@ def enabled_sources() -> list[str]:
     """Sources picked in the sidebar. Documents only count once something is uploaded."""
     picked = st.session_state.get("sources_pick", ["Web", "Wikipedia"]) or []
     return [x for x in SOURCE_OPTIONS if x in picked and (x != "Documents" or st.session_state.docs)]
+
+
+def source_rules() -> dict:
+    """Allowlist, denylist and recency from Settings. Enforced in the search tools themselves."""
+    return {"allow": parse_domains(st.session_state.get("rule_allow", "")),
+            "deny": parse_domains(st.session_state.get("rule_deny", "")),
+            "recency": st.session_state.get("rule_recency") or "Any time"}
+
+
+def rules_summary(rules: dict | None = None) -> str:
+    r = rules or source_rules()
+    parts = []
+    if r["allow"]:
+        parts.append("only " + ", ".join(r["allow"]))
+    if r["deny"]:
+        parts.append("never " + ", ".join(r["deny"]))
+    if r["recency"] != "Any time":
+        parts.append(r["recency"].lower())
+    return "; ".join(parts)
+
+
+def rules_instruction() -> str:
+    r = source_rules()
+    lines = []
+    if r["allow"]:
+        lines.append(f"Only use and cite sources from these domains: {', '.join(r['allow'])}.")
+    if r["deny"]:
+        lines.append(f"Never use or cite sources from: {', '.join(r['deny'])}.")
+    if r["recency"] != "Any time":
+        lines.append(f"Prefer sources published in the {r['recency'].lower()}; say when a source is older.")
+    return ("\n\nSource rules set by the user:\n" + "\n".join(lines)) if lines else ""
 
 
 @st.cache_resource(show_spinner="Starting the research agent...")
@@ -181,11 +279,15 @@ def estimate_cost(input_tokens: int, output_tokens: int) -> float | None:
 
 
 def log_run(kind: str, query: str, session_id: str | None, seconds: float, counter: TokenCounter,
-            searches: int, status: str, checks: dict | None = None, error: str | None = None):
+            searches: int, status: str, checks: dict | None = None, error: str | None = None,
+            context_chars: int = 0):
     st.session_state.runs.append({
         "time": now(), "kind": kind, "query": query, "session": session_id, "seconds": seconds,
         "tokens_in": counter.input_tokens, "tokens_out": counter.output_tokens, "searches": searches,
         "status": status, "checks": checks or {}, "error": error, "depth": depth(),
+        "model": MODEL_NAME, "prompt_version": PROMPT_VERSION, "rules": rules_summary() or "none",
+        "context_chars": context_chars,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
     })
 
 
@@ -238,8 +340,8 @@ def safe_filename(name: str) -> str:
     return name if name.lower().endswith(".txt") else f"{name}.txt"
 
 
-def card(d: dict) -> ResearchResponse | None:
-    """The most recent successful answer card in a session."""
+def card(d: dict) -> Answer | None:
+    """The most recent successful answer in a session."""
     for t in reversed(d["turns"]):
         if t["card"] is not None:
             return t["card"]
@@ -251,31 +353,193 @@ def dossier_status(d: dict) -> str:
         return "Failed"
     if any(r.get("dossier") == d["id"] for r in st.session_state.pending_saves):
         return "Needs approval"
+    if review_queue(d):
+        return "Needs review"
     return "Complete"
+
+
+# ---------- Claims ----------
+
+def all_claims(d: dict) -> list[tuple[int, int, dict]]:
+    """(turn index, claim index, claim) for every checked claim in a case."""
+    return [(n, k, c) for n, t in enumerate(d["turns"]) for k, c in enumerate(t.get("claims") or [])]
+
+
+def needs_review(c: dict) -> bool:
+    return c["review"] is None and (c["verdict"] != "Supported" or bool(c["conflict_quote"]))
+
+
+def review_queue(d: dict) -> list[tuple[int, int, dict]]:
+    return [x for x in all_claims(d) if needs_review(x[2])]
+
+
+def conflicts(d: dict) -> list[tuple[int, int, dict]]:
+    return [x for x in all_claims(d) if x[2]["conflict_quote"]]
+
+
+def review_claim(idx: int, n: int, k: int, decision: str | None):
+    st.session_state.dossiers[idx]["turns"][n]["claims"][k]["review"] = decision
+
+
+def claims_summary(claims: list[dict]) -> str:
+    if not claims:
+        return ""
+    ok = sum(c["verdict"] == "Supported" for c in claims)
+    text = f"{ok}/{len(claims)} claims supported"
+    flagged = sum(needs_review(c) for c in claims)
+    if flagged:
+        text += f" · {flagged} to review"
+    return text
+
+
+def _norm_text(s: str) -> str:
+    s = re.sub(r"[\"'“”‘’`*_]", "", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _quote_in(quote: str, haystack: str) -> bool:
+    """True if every part of a quote (split on ellipses) appears word for word in the evidence."""
+    parts = [p.strip(" .,;:") for p in re.split(r"\.\.\.|…", _norm_text(quote))]
+    parts = [p for p in parts if len(p) >= 12]
+    return bool(parts) and all(p in haystack for p in parts)
+
+
+def _evidence_text(steps: list, cap: int = 24000) -> str:
+    """The retrieved text the claims are checked against, newest lookups first."""
+    out, used = [], 0
+    for s in reversed(steps):
+        block = f"(Retrieved with {step_name(s.tool)}: {s.tool_input[:80]})\n{s.output}"
+        if used + len(block) > cap:
+            break
+        out.append(block)
+        used += len(block)
+    return "\n\n".join(out)
+
+
+def verify_claims(c: Answer, steps: list, parent, counter: TokenCounter) -> list[dict]:
+    """Check each claim in an answer against the retrieved text, inside `parent` (a chat bubble).
+
+    The checker quotes its evidence; the code then confirms each quote really is in the text
+    the tools returned. A quote that isn't there can't support anything, so the claim is
+    downgraded rather than trusted. Code answers make no factual claims and are skipped.
+    """
+    if c.response_type == "code" or not c.sources:
+        return []
+    evidence = _evidence_text(steps)
+    text = "\n\n".join([c.direct_answer] + list(c.details)
+                       + [f"{r.option} — {r.aspect}: {r.value}" for r in (c.comparison or [])])
+    urls = [s.url or s.title for s in c.sources]
+    with parent:
+        status = st.status(":shimmer[Checking each claim against the sources...]", type="compact")
+        if not evidence.strip():
+            status.update(label="No retrieved text to check claims against", state="complete")
+            return []
+        try:
+            checked = check_claims(cached_llm(), text, urls, evidence, callbacks=[counter])
+        except Exception as e:
+            status.update(label=f"Couldn't check claims ({type(e).__name__})", state="error")
+            return []
+    hay = _norm_text(evidence)
+
+    def src(i: int) -> str:
+        return urls[i - 1] if 1 <= i <= len(urls) else ""
+
+    claims = []
+    for k in checked:
+        found = bool(k.quote.strip()) and _quote_in(k.quote, hay)
+        verdict, reason, downgraded = k.verdict, k.reason.strip(), False
+        if verdict in ("Supported", "Partially supported") and not found:
+            verdict, downgraded = "Insufficient evidence", True
+            reason = "The quoted passage isn't in the text the agent retrieved, so it can't count as support."
+        conflict = k.conflict_quote.strip() if k.conflict_quote.strip() and _quote_in(k.conflict_quote, hay) else ""
+        claims.append({
+            "claim": k.claim.strip(), "verdict": verdict, "reason": reason,
+            "quote": k.quote.strip() if found else "", "source": src(k.source_id) if found else "",
+            "conflict_quote": conflict, "conflict_source": src(k.conflict_source_id) if conflict else "",
+            "downgraded": downgraded, "review": None,
+        })
+    ok = sum(x["verdict"] == "Supported" for x in claims)
+    status.update(label=f"Checked {_plural(len(claims), 'claim')} · {ok} supported", state="complete")
+    return claims
 
 
 def source_count(d: dict) -> int:
     return len(d["sources"])
 
 
-def _card_markdown(c: ResearchResponse) -> str:
-    parts = [f"*{c.answer_type}*", c.answer]
+def _card_markdown(c: Answer) -> str:
+    parts = [f"*{TYPE_LABELS.get(c.response_type, c.response_type)}* · {c.title}", c.direct_answer]
+    if c.verdict:
+        parts.append(f"**Verdict:** {VERDICT_LABELS[c.verdict][0]}")
+    if c.code:
+        parts.append((f"`{c.code.filename}`\n\n" if c.code.filename else "")
+                     + f"```{c.code.language.lower()}\n{c.code.code}\n```")
+        if c.code.run_instructions:
+            parts.append("Run:\n```bash\n" + "\n".join(c.code.run_instructions) + "\n```")
+        if c.code.expected_output:
+            parts.append(f"Expected output:\n```text\n{c.code.expected_output}\n```")
+        if c.code.explanation:
+            parts.append("\n".join(f"- {x}" for x in c.code.explanation))
+    if c.comparison:
+        parts.append(_comparison_table(c))
     if c.details:
-        parts.append("\n".join(f"- {f.text}" + (f" [{', '.join(map(str, f.source_ids))}]" if f.source_ids else "")
-                               for f in c.details))
-    if c.summary:
-        parts.append(c.summary)
+        parts.append("\n".join(f"- {x}" for x in c.details))
     if c.sources:
-        parts.append("Sources:\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(c.sources, 1)))
+        parts.append("Sources:\n" + "\n".join(
+            f"{s.id}. {s.title} — {s.url or 'uploaded document'}" + (f" — “{s.quote}”" if s.quote else "")
+            for s in c.sources))
     return "\n\n".join(parts)
 
 
 def report_markdown(d: dict) -> str:
-    """The whole research thread as Markdown: every question with its answer."""
-    parts = [f"# {d['title']}"]
-    for t in d["turns"]:
-        parts.append(f"## {t['question']}")
+    """Audit report: every answer with its claims, quoted evidence and verdicts, then the plan
+    versions, the lookups made and the run trace."""
+    claims, queue, confl = all_claims(d), review_queue(d), conflicts(d)
+    ok = sum(c["verdict"] == "Supported" for _, _, c in claims)
+    parts = [
+        f"# {d['title']}",
+        f"**Research case** · {dossier_status(d)} · v{sum(t['card'] is not None for t in d['turns'])} · "
+        f"exported {datetime.now():%Y-%m-%d %H:%M}  \n"
+        f"Model `{MODEL_NAME}` · prompt version `{PROMPT_VERSION}` · depth {d.get('depth', 'Standard')}  \n"
+        f"Claims: {ok}/{len(claims)} supported · {len(queue)} awaiting review · {len(confl)} with conflicting evidence",
+    ]
+    for i, t in enumerate(d["turns"], 1):
+        parts.append(f"## {i}. {t['question']}")
+        parts.append(f"_Asked {t.get('timestamp', t['time'])} · {turn_status(t)}"
+                     + (f" · source rules: {t['rules']}" if t.get("rules") else "") + "_")
         parts.append(_card_markdown(t["card"]) if t["card"] else f"_{t['error'] or 'No answer.'}_")
+        if t.get("claims"):
+            rows = ["| # | Claim | Verdict | Evidence (quoted) | Source | Review |", "|---|---|---|---|---|---|"]
+            for k, c in enumerate(t["claims"], 1):
+                verdict = c["verdict"] + (" · conflicting evidence" if c["conflict_quote"] else "")
+                rows.append("| " + " | ".join(_cell(x) for x in [
+                    k, c["claim"], verdict, f"“{c['quote']}”" if c["quote"] else "–",
+                    c["source"] or "–", c["review"] or ("pending" if needs_review(c) else "–")]) + " |")
+            parts.append("**Claims**\n\n" + "\n".join(rows))
+            for c in t["claims"]:
+                if c["conflict_quote"]:
+                    parts.append(f"> **Conflict:** “{c['claim']}” is contradicted by: “{c['conflict_quote']}” "
+                                 f"({c['conflict_source'] or 'retrieved text'})")
+    parts.append("---\n\n## Appendix A. Plan versions")
+    if d.get("plans"):
+        for p in d["plans"]:
+            steps = "\n".join(f"{i}. {s['question']} ({', '.join(s['sources'])}; {s.get('priority', 'Required')}; "
+                              f"{s.get('origin', 'drafted by agent')})" + (f" Why: {s['why']}" if s.get("why") else "")
+                              for i, s in enumerate(p["steps"], 1))
+            parts.append(f"**v{p['version']}**, approved {p['time']} for “{p['question']}”\n\n{steps}")
+    else:
+        parts.append("_No plan: researched in Auto-research mode._")
+    parts.append("## Appendix B. Lookups")
+    parts.append("\n".join(f"- {step_name(s.tool)}: {s.tool_input}" for s in d["evidence"]) or "_None._")
+    parts.append("## Appendix C. Run trace\n\n" + _trace_table(d))
+    parts.append("## How to read this\n\n"
+                 "- **Supported**: the quoted passage fully backs the claim.\n"
+                 "- **Partially supported**: it backs part of the claim, or a weaker version.\n"
+                 "- **Unsupported**: the evidence addresses the point but doesn't back the claim.\n"
+                 "- **Insufficient evidence**: nothing retrieved addresses it.\n\n"
+                 "Every quote was checked word for word against the text the research tools returned; "
+                 "claims whose quote couldn't be found there were downgraded. This makes each material "
+                 "claim traceable to inspectable evidence. It is not a guarantee that the claims are true.")
     return "\n\n".join(parts) + "\n"
 
 
@@ -294,34 +558,18 @@ def _plural(n: int, word: str) -> str:
 
 # ---------- Evidence pack ----------
 
-def evidence_pack(d: dict) -> str:
-    """Compact context for follow-ups.
-
-    Sends the original question, the last few questions with short answers, the session's
-    numbered sources, and the newest tool snippets up to EVIDENCE_PACK_CHARS. Never the
-    whole raw conversation or full pages.
-    """
-    parts = [f"ORIGINAL QUESTION: {d['query']}"]
-    answered = [t for t in d["turns"] if t["card"] is not None][-4:]
-    if answered:
-        parts.append("CONVERSATION SO FAR:\n" + "\n\n".join(
-            f"Q: {t['question']}\nA: {t['card'].answer[:600]}" for t in answered
-        ))
-    if d["sources"]:
-        parts.append("SOURCES:\n" + "\n".join(f"[{i}] {s}" for i, s in enumerate(d["sources"], 1)))
-    snippets, budget = [], EVIDENCE_PACK_CHARS
-    for step in reversed(d["evidence"]):  # newest first
-        snip = f"({step_name(step.tool)}: {step.tool_input[:80]})\n{step.output[:700]}"
-        if len(snip) > budget:
-            break
-        snippets.append(snip)
-        budget -= len(snip)
-    if snippets:
-        parts.append("EVIDENCE SNIPPETS:\n" + "\n\n".join(snippets))
-    return "\n\n".join(parts)
+def session_pack(d: dict, question: str) -> str:
+    """Compact, structured context for a follow-up: the original question, the current answer
+    (and code), and the strongest evidence items for this follow-up. Never raw pages or the
+    whole chat history."""
+    c = card(d)
+    current = (c.direct_answer + ("\n" + "\n".join(f"- {x}" for x in c.details) if c.details else "")) if c else ""
+    return build_pack(d["query"], current, c.code.code if c and c.code else None,
+                      [t["question"] for t in d["turns"]], d["evidence_items"], question)
 
 
-def _add_evidence(d: dict, steps: list):
+def _add_evidence(d: dict, steps: list, question: str = ""):
+    """Keep raw lookups for the audit trail and quote checks, and compress each into evidence items."""
     seen = {(s.tool, s.tool_input) for s in d["evidence"]}
     for s in steps:
         if s.output.startswith("Search budget"):
@@ -329,6 +577,8 @@ def _add_evidence(d: dict, steps: list):
         if s.tool in LOOKUP_TOOLS and (s.tool, s.tool_input) not in seen:
             d["evidence"].append(s)
             seen.add((s.tool, s.tool_input))
+            compress_step(s.tool, s.tool_input, s.output, question or d["query"],
+                          d.setdefault("retrieved", []), d.setdefault("evidence_items", []))
 
 
 # ---------- Automatic quality checks ----------
@@ -347,12 +597,12 @@ def _is_grounded(source: str, outputs: str, used_tools: set[str]) -> bool:
     return src.startswith("wikipedia") and "wikipedia" in used_tools
 
 
-def quality_checks(response: ResearchResponse | None, steps: list, plan_steps: list[dict] | None) -> dict:
+def quality_checks(response: Answer | None, steps: list, plan_steps: list[dict] | None) -> dict:
     used = {s.tool for s in steps}
     outputs = "\n".join(s.output for s in steps).lower()
     grounded = None
     if response and response.sources:
-        hits = sum(_is_grounded(s, outputs, used) for s in response.sources)
+        hits = sum(_is_grounded(s.url or s.title, outputs, used) for s in response.sources)
         grounded = (hits, len(response.sources))
     plan = None
     if plan_steps:
@@ -414,7 +664,16 @@ def cancel_clarify():
 
 def add_plan_step():
     plan = st.session_state.pending_plan
-    plan["steps"].append({"sid": uuid.uuid4().hex[:8], "question": "", "sources": [plan["allowed"][0]], "expected": ""})
+    plan["steps"].append({"sid": uuid.uuid4().hex[:8], "question": "", "sources": [plan["allowed"][0]],
+                          "expected": "", "why": "", "origin": "you", "priority": "Required"})
+
+
+def move_plan_step(sid: str, delta: int):
+    steps = st.session_state.pending_plan["steps"]
+    i = next(k for k, s in enumerate(steps) if s["sid"] == sid)
+    j = i + delta
+    if 0 <= j < len(steps):
+        steps[i], steps[j] = steps[j], steps[i]
 
 
 def remove_plan_step(sid: str):
@@ -422,7 +681,7 @@ def remove_plan_step(sid: str):
     plan["steps"] = [s for s in plan["steps"] if s["sid"] != sid]
 
 
-def new_research_job(query: str, idx: int | None = None) -> dict:
+def new_research_job(query: str, idx: int | None = None, route: dict | None = None) -> dict:
     """A full-research job, following the sidebar's research mode.
 
     `idx` is the open thread the answer is appended to; None starts a new session.
@@ -433,21 +692,29 @@ def new_research_job(query: str, idx: int | None = None) -> dict:
         "Auto-research": {"kind": "research", "query": query, "steps": None, "context": ""},
     }[mode()]
     job["idx"] = idx
+    job["route"] = route
     return job
 
 
 def decide(choice: str):
-    """Resolve the 'evidence isn't enough' card."""
+    """Resolve an ask-before-searching message.
+
+    "further": research further in this session (bounded search). "anyway": answer from the
+    current research. "new": start a separate research case for this question.
+    """
     dec = st.session_state.pending_decision
     st.session_state.pending_decision = None
     if not dec:
         return
     if choice == "further":
-        st.session_state.job = {"kind": "further", "idx": dec["idx"], "question": dec["question"]}
+        st.session_state.job = {"kind": "further", "idx": dec["idx"], "question": dec["question"],
+                                "route": dec.get("route")}
     elif choice == "anyway":
-        st.session_state.job = {"kind": "context", "idx": dec["idx"], "question": dec["question"], "force": True}
-    else:  # research it in the same thread, below the earlier messages
-        st.session_state.job = new_research_job(dec["question"], dec["idx"])
+        st.session_state.job = {"kind": "context", "idx": dec["idx"], "question": dec["question"], "force": True,
+                                "route": dec.get("route")}
+    else:
+        st.session_state.active = None
+        st.session_state.job = {"kind": "start", "query": dec["question"]}
 
 
 def _store_file(name: str, data: str) -> str:
@@ -481,6 +748,14 @@ def skip_save(req_id: str):
 def save_report(idx: int):
     d = st.session_state.dossiers[idx]
     name = _store_file(safe_filename(d["title"][:50].replace(" ", "_")), report_markdown(d))
+    st.toast(f"Saved {name} to your library", icon=":material/check_circle:")
+
+
+def save_turn(idx: int, n: int):
+    d = st.session_state.dossiers[idx]
+    t = d["turns"][n]
+    name = _store_file(safe_filename((t["card"].title or d["title"])[:50].replace(" ", "_")),
+                       f"# {t['question']}\n\n{_card_markdown(t['card'])}\n")
     st.toast(f"Saved {name} to your library", icon=":material/check_circle:")
 
 
@@ -566,11 +841,12 @@ def _budgeted(tools: list, budget: int) -> list:
 
 def _tools(pending: list, lookup_budget: int | None = None) -> list:
     sources = enabled_sources()
+    rules = source_rules()
     tools = []
     if "Web" in sources:
-        tools.append(search_tool)
-    if "Wikipedia" in sources:
-        tools.append(wiki_tool)
+        tools.append(make_search_tool(rules["allow"], rules["deny"], rules["recency"]))
+    if "Wikipedia" in sources and (wiki := make_wiki_tool(rules["allow"], rules["deny"])):
+        tools.append(wiki)
     if "Documents" in sources:
         tools.append(make_documents_tool(list(st.session_state.docs.values())))
     if lookup_budget is not None:
@@ -614,7 +890,7 @@ def draft_plan(query: str, context: str, slot):
                               n_steps=DEPTHS[depth()]["steps"], callbacks=[counter])
     add_usage(counter)
     for step in steps:
-        step["sid"] = uuid.uuid4().hex[:8]
+        step.update(sid=uuid.uuid4().hex[:8], origin="agent", priority="Required")
     st.session_state.pending_plan = {
         "id": uuid.uuid4().hex[:8], "query": query, "context": context, "steps": steps, "allowed": allowed,
     }
@@ -624,39 +900,76 @@ def _key(source: str) -> str:
     return source.strip().lower().rstrip("/")
 
 
-def _new_turn(question: str, route: str, c: ResearchResponse | None, seconds: float, searches: int = 0,
-              new_sources: int = 0, error: str | None = None, raw: str = "", checks: dict | None = None) -> dict:
+def _new_turn(question: str, route: str, c: Answer | None, seconds: float, searches: int = 0,
+              new_sources: int = 0, error: str | None = None, raw: str = "", checks: dict | None = None,
+              claims: list | None = None, plan_version: int | None = None, context_mode: str = "new_research",
+              route_info: dict | None = None, context_chars: int = 0) -> dict:
     return {"question": question, "route": route, "card": c, "error": error, "raw": raw, "time": now(),
-            "seconds": seconds, "searches": searches, "new_sources": new_sources, "checks": checks or {},
-            "fresh": c is not None}
+            "timestamp": datetime.now().isoformat(timespec="seconds"), "seconds": seconds,
+            "searches": searches, "new_sources": new_sources, "checks": checks or {}, "fresh": c is not None,
+            "claims": claims or [], "plan_version": plan_version, "rules": rules_summary(),
+            "context_mode": context_mode, "route_info": route_info, "context_chars": context_chars}
 
 
-def _add_sources(d: dict, c: ResearchResponse) -> int:
-    """Add a card's sources to the session's source list. Returns how many were new."""
-    known = {_key(s) for s in d["sources"]}
+def _claim_checks(checks: dict, claims: list[dict]) -> dict:
+    if claims:
+        checks["claims"] = (sum(c["verdict"] == "Supported" for c in claims), len(claims))
+    return checks
+
+
+def _record_plan(d: dict, steps: list[dict] | None, question: str) -> int | None:
+    """Keep each approved plan as a numbered version on the case. Returns its version."""
+    if not steps:
+        return None
+    d.setdefault("plans", [])
+    version = len(d["plans"]) + 1
+    d["plans"].append({"version": version, "question": question, "time": now(), "steps": steps})
+    return version
+
+
+def _add_sources(d: dict, c: Answer) -> int:
+    """Add an answer's cited sources to the session (only new ones). Returns how many were new."""
+    known = {_key(s["url"] or s["title"]) for s in d["sources"]}
     added = 0
     for s in c.sources:
-        if _key(s) not in known:
-            d["sources"].append(s)
-            known.add(_key(s))
+        key = _key(s.url or s.title)
+        if key and key not in known:
+            d["sources"].append({"id": f"S{len(d['sources']) + 1}", "title": s.title, "url": s.url,
+                                 "domain": s.domain or s.title})
+            known.add(key)
             added += 1
     return added
 
 
+def _run_context(d_id: str, route: Route | None, budget: int | None) -> RunContext:
+    return RunContext(thread_id=d_id, response_type=route.response_type if route else "research",
+                      context_mode=route.context_mode if route else "new_research", depth=depth(),
+                      sources=enabled_sources(), source_rules=rules_summary() or "none", search_budget=budget)
+
+
+def _route(route) -> Route | None:
+    if route is None or isinstance(route, Route):
+        return route
+    return Route.model_validate(route)
+
+
 def execute(query: str, steps: list[dict] | None, slot, context: str = "", idx: int | None = None,
-            show_question: bool = True):
+            show_question: bool = True, route=None):
     """Run full research with live progress and store the answer as a turn.
 
-    With `idx`, the answer is appended to that thread (below the earlier messages) instead of
-    starting a new session. `show_question=False` when the question bubble is already on screen.
+    With `idx`, the answer is appended to that session (below the earlier messages) instead of
+    starting a new one. `show_question=False` when the question bubble is already on screen.
     """
+    route = _route(route)
+    rtype = route.response_type if route and route.response_type != "clarification" else "research"
     sources = enabled_sources()
     cfg = DEPTHS[depth()]
     pending: list = []
     counter = TokenCounter()
     result, error = None, None
+    d_id = st.session_state.dossiers[idx]["id"] if idx is not None else uuid.uuid4().hex[:8]
 
-    instructions = context + plan_to_instructions(steps)
+    instructions = context + plan_to_instructions(steps) + rules_instruction()
     if cfg["instruction"]:
         instructions += f"\n\n{cfg['instruction']}"
 
@@ -665,17 +978,20 @@ def execute(query: str, steps: list[dict] | None, slot, context: str = "", idx: 
         if show_question:
             _user_message(query)
         # When continuing a follow-up, `slot` is already that answer's assistant bubble.
-        with st.chat_message("assistant") if show_question else st.container():
+        bubble = st.chat_message("assistant") if show_question else st.container()
+        with bubble:
             st.caption(" · ".join(filter(None, [
-                f"Following your {len(steps)}-step plan" if steps else None, f"{depth()} depth", ", ".join(sources),
+                TYPE_LABELS.get(rtype), f"Following your {len(steps)}-step plan" if steps else None,
+                f"{depth()} depth", ", ".join(sources), f"Rules: {rules_summary()}" if rules_summary() else None,
             ])))
             live = st.status(":shimmer[Planning searches...]", type="compact")
         scroll_to_bottom()
         executor = build_agent_executor(cached_llm(), _tools(pending), max_iterations=cfg["max_iterations"],
                                         max_execution_time=cfg["max_seconds"])
         try:
-            # A new session starts fresh: no earlier conversation is sent.
-            result = run_research(executor, query + instructions, None, callbacks=[LiveProgress(live), counter])
+            result = run_research(executor, typed_request(query, rtype) + instructions, None,
+                                  callbacks=[LiveProgress(live), counter],
+                                  context=_run_context(d_id, route, None))
             if result.hit_limit:
                 error = (f"Stopped at the {depth()} depth limit before finishing. "
                          "Try again with a deeper setting or a narrower question.")
@@ -687,60 +1003,119 @@ def execute(query: str, steps: list[dict] | None, slot, context: str = "", idx: 
             error = str(e)
             live.update(label="Research failed", state="error")
 
+    lookups = [s for s in (result.steps if result else []) if s.tool in LOOKUP_TOOLS]
+    earlier = st.session_state.dossiers[idx]["evidence"] if idx is not None else []
+    response = None
+    if result and result.response and not error:
+        response = _finalize(result.response, None, earlier + lookups, "new_research", len(lookups))
+    claims = verify_claims(response, earlier + lookups, bubble, counter) if response else []
     seconds = time.perf_counter() - start
     add_usage(counter)
-    response = result.response if result and not error else None
-    lookups = [s for s in (result.steps if result else []) if s.tool in LOOKUP_TOOLS]
-    checks = quality_checks(response, lookups, steps)
+    checks = _claim_checks(quality_checks(response, lookups, steps), claims)
     status = "Failed" if response is None else "Complete"
+    route_info = route.model_dump() if route else None
 
-    if idx is not None:  # continue the open thread: a new message below the earlier ones
+    if idx is not None:  # continue the open session: a new message below the earlier ones
         d = st.session_state.dossiers[idx]
-        _add_evidence(d, lookups)
+        _add_evidence(d, lookups, query)
         n_sources = _add_sources(d, response) if response else 0
         d["turns"].append(_new_turn(query, "New research", response, seconds, len(lookups), n_sources, error,
-                                    result.raw_text if result else "", checks))
+                                    result.raw_text if result else "", checks, claims,
+                                    _record_plan(d, steps, query), "new_research", route_info))
+        if response:
+            d["version"] += 1
         d["updated"] = now()
         _attach_saves(pending, d, query)
         log_run("New research", query, d["id"], seconds, counter, len(lookups), status, checks, error)
         return
 
     d = {
-        "id": uuid.uuid4().hex[:8],
-        "query": query,
-        "title": response.topic if response else query[:60],
+        "id": d_id,
+        "thread_id": d_id,  # stable for the life of the session; every run is traced under it
+        "query": query,  # the original question
+        "title": (response.title if response else "") or query[:60],
         "created": now(),
         "updated": now(),
         "mode": mode(),
         "depth": depth(),
         "enabled_sources": sources,
-        "sources": [],  # every source cited anywhere in this session
-        "evidence": [],  # every lookup made in this session
-        "turns": [],
+        "sources": [],  # sources cited anywhere in this session (new ones are added, never repeated)
+        "evidence": [],  # raw lookups: the audit trail, and what quotes are checked against
+        "evidence_items": [],  # compressed, citable evidence: what follow-ups are answered from
+        "retrieved": [],  # every source retrieved, cited or not
+        "turns": [],  # the messages: each question with its answer
+        "plans": [],  # every approved plan, as numbered versions
+        "version": 1 if response else 0,
+        "search_budget": FURTHER_MAX_LOOKUPS,
     }
-    _add_evidence(d, lookups)
+    _add_evidence(d, lookups, query)
     n_sources = _add_sources(d, response) if response else 0
     d["turns"].append(_new_turn(query, "New research", response, seconds, len(lookups), n_sources, error,
-                                result.raw_text if result else "", checks))
+                                result.raw_text if result else "", checks, claims,
+                                _record_plan(d, steps, query), "new_research", route_info))
     st.session_state.dossiers.append(d)
     st.session_state.active = len(st.session_state.dossiers) - 1
     _attach_saves(pending, d, query)
     log_run("New research", query, d["id"], seconds, counter, len(lookups), status, checks, error)
 
 
+def answer_directly(query: str, route, slot):
+    """A first question that needs no research (code, a plain explanation): one model call, no tools."""
+    route = _route(route)
+    counter = TokenCounter()
+    start = time.perf_counter()
+    resp, error = None, None
+    with slot.container():
+        _user_message(query)
+        with st.chat_message("assistant"):
+            with st.status(f":shimmer[Writing the {TYPE_LABELS[route.response_type].lower()}...]",
+                           type="compact") as status:
+                try:
+                    resp = answer_direct(cached_llm(), query, route.response_type, callbacks=[counter])
+                    if resp is None:
+                        error = "The model returned no answer."
+                except Exception as e:
+                    error = str(e)
+                status.update(label="Done" if not error else "Couldn't answer",
+                              state="error" if error else "complete")
+    seconds = time.perf_counter() - start
+    add_usage(counter)
+    response = _finalize(resp, set(), [], "direct", 0) if resp else None
+    d_id = uuid.uuid4().hex[:8]
+    d = {"id": d_id, "thread_id": d_id, "query": query, "title": (response.title if response else "") or query[:60],
+         "created": now(), "updated": now(), "mode": mode(), "depth": depth(), "enabled_sources": enabled_sources(),
+         "sources": [], "evidence": [], "evidence_items": [], "retrieved": [], "turns": [], "plans": [],
+         "version": 1 if response else 0, "search_budget": FURTHER_MAX_LOOKUPS}
+    d["turns"].append(_new_turn(query, "Direct answer", response, seconds, error=error, context_mode="direct",
+                                route_info=route.model_dump(), checks={"format": response is not None}))
+    st.session_state.dossiers.append(d)
+    st.session_state.active = len(st.session_state.dossiers) - 1
+    log_run("Direct answer", query, d_id, seconds, counter, 0, "Failed" if error else "Complete",
+            {"format": response is not None}, error)
+
+
 # ---------- Run stages: follow-ups in the same session ----------
 
-def _append_answer(idx: int, question: str, new_card: ResearchResponse, new_steps: list, route: str,
-                   seconds: float, counter: TokenCounter):
-    """Add a follow-up answer as a new turn below the earlier ones."""
+def _append_answer(idx: int, question: str, new_card: Answer, new_steps: list, route: str,
+                   seconds: float, counter: TokenCounter, bubble, context_mode: str = "answer_from_session",
+                   route_info: dict | None = None, context_chars: int = 0):
+    """Check the answer's claims, then add it to the same session as a new message (version + 1)."""
     d = st.session_state.dossiers[idx]
-    _add_evidence(d, new_steps)
+    _add_evidence(d, new_steps, question)
     searches = len([s for s in new_steps if s.tool in LOOKUP_TOOLS and not s.output.startswith("Search budget")])
     new_sources = _add_sources(d, new_card)
-    checks = quality_checks(new_card, d["evidence"], None)
-    d["turns"].append(_new_turn(question, route, new_card, seconds, searches, new_sources, checks=checks))
+    vc = TokenCounter()
+    claims = verify_claims(new_card, d["evidence"], bubble, vc)
+    add_usage(vc)
+    counter.input_tokens += vc.input_tokens
+    counter.output_tokens += vc.output_tokens
+    checks = _claim_checks(quality_checks(new_card, d["evidence"], None), claims)
+    d["turns"].append(_new_turn(question, route, new_card, seconds, searches, new_sources, checks=checks,
+                                claims=claims, context_mode=context_mode, route_info=route_info,
+                                context_chars=context_chars))
+    d["version"] += 1
     d["updated"] = now()
-    log_run(route, question, d["id"], seconds, counter, searches, "Complete", checks)
+    log_run(route, question, d["id"], seconds, counter, searches, "Complete", checks, context_chars=context_chars)
 
 
 def _append_failure(idx: int, question: str, route: str, error: str, seconds: float):
@@ -749,26 +1124,49 @@ def _append_failure(idx: int, question: str, route: str, error: str, seconds: fl
     d["updated"] = now()
 
 
-def _strip_followup_fields(resp) -> ResearchResponse:
-    return ResearchResponse.model_validate(
-        resp.model_dump(exclude={"evidence_sufficient", "different_topic", "missing"})
-    )
+def _strip_followup_fields(resp) -> Answer:
+    return Answer.model_validate(resp.model_dump(exclude={"evidence_sufficient", "missing"}))
 
 
-def _known_sources_only(c: ResearchResponse, known: list[str]) -> ResearchResponse:
-    """Answering from existing research runs no tools, so it can't legitimately cite new sources.
-    Drop any source the session hasn't seen, and renumber the citations that remain."""
-    allowed = {_key(s) for s in known}
-    keep = [i for i, s in enumerate(c.sources, 1) if _key(s) in allowed]
-    if len(keep) == len(c.sources):
-        return c
-    remap = {old: new for new, old in enumerate(keep, 1)}
+_MARKER = re.compile(r"\[(\d{1,2}(?:\s*,\s*\d{1,2})*)\](?!\()")
+
+
+def _remap_markers(text: str, mapping: dict[str, str]) -> str:
+    """Rewrite [n] / [n, m] markers through `mapping`; markers for dropped sources disappear."""
+    def repl(m: re.Match) -> str:
+        ids = [mapping[x.strip()] for x in m.group(1).split(",") if x.strip() in mapping]
+        return "".join(f"[{i}]" for i in ids)
+    parts = text.split("```")
+    for k in range(0, len(parts), 2):  # never touch code
+        parts[k] = _MARKER.sub(repl, parts[k])
+    return "```".join(parts)
+
+
+def _finalize(c: Answer, allowed: set[str] | None, steps: list, context_mode: str, new_searches: int) -> Answer:
+    """Make an answer safe to show and store.
+
+    - `allowed` (for answers written without searching): drop any source the session never saw.
+    - Number the sources 1..n and rewrite the [n] markers to match.
+    - Keep a source's quote only if it appears word for word in the retrieved text.
+    - Record how the answer was produced (context_mode, new_searches).
+    """
+    if not isinstance(c, Answer) or type(c) is not Answer:
+        c = _strip_followup_fields(c) if hasattr(c, "evidence_sufficient") else Answer.model_validate(c.model_dump())
+    keep = [s for s in c.sources if allowed is None or _key(s.url or s.title) in allowed]
+    mapping, sources = {}, []
+    hay = _norm_text(_evidence_text(steps)) if steps else ""
+    for n, s in enumerate(keep, 1):
+        mapping[s.id] = str(n)
+        quote = s.quote if s.quote and hay and _quote_in(s.quote, hay) else None
+        sources.append(s.model_copy(update={"id": str(n), "quote": quote}))
     return c.model_copy(update={
-        "sources": [c.sources[i - 1] for i in keep],
-        "evidence": [e.model_copy(update={"source_id": remap[e.source_id]}) for e in c.evidence
-                     if e.source_id in remap],
-        "details": [f.model_copy(update={"source_ids": [remap[i] for i in f.source_ids if i in remap]})
-                    for f in c.details],
+        "sources": sources,
+        "direct_answer": _remap_markers(c.direct_answer, mapping),
+        "details": [_remap_markers(x, mapping) for x in c.details],
+        "comparison": [r.model_copy(update={"value": _remap_markers(r.value, mapping)}) for r in c.comparison]
+        if c.comparison else None,
+        "context_mode": context_mode,
+        "new_searches": new_searches,
     })
 
 
@@ -777,74 +1175,134 @@ def _user_message(question: str):
         st.markdown(question)
 
 
-def followup_from_evidence(idx: int, question: str, slot, force: bool = False):
-    """Answer a follow-up from the session's evidence first (no tool calls).
+def _ask_before_searching(idx: int, question: str, kind: str, missing: str, route: Route | None = None):
+    """Stop and let the user decide; the question and the choice appear as messages in the thread."""
+    st.session_state.pending_decision = {"idx": idx, "question": question, "kind": kind,
+                                         "missing": (missing or "").strip(),
+                                         "route": route.model_dump() if route else None}
 
-    If that evidence doesn't cover it, search for what's missing (within FURTHER_MAX_LOOKUPS).
-    A different topic gets full research, still in this thread, so nothing earlier disappears.
+
+def session_summary(d: dict) -> str:
+    c = card(d)
+    return (f"{d['title']} (original question: {d['query']}; latest answer type: "
+            f"{c.response_type if c else 'none'}; {len(d['evidence_items'])} evidence items)")
+
+
+def run_followup(idx: int, question: str, fmode: str, slot):
+    """Route a follow-up, then act according to the follow-up mode the user picked.
+
+    "Use current research": answer from the session's evidence. Never searches; if new facts are
+    needed, say so and offer "Research further".
+    "Research further": up to FURTHER_MAX_LOOKUPS new searches in this session; a new topic is
+    confirmed before starting a separate case.
     """
     d = st.session_state.dossiers[idx]
     counter = TokenCounter()
-    start = time.perf_counter()
-    resp, error = None, None
     with slot.container():
         _user_message(question)
-        bubble = st.chat_message("assistant")  # one bubble for this answer, even if it escalates
+        bubble = st.chat_message("assistant")  # one bubble for this answer, whatever it turns into
         with bubble:
-            with st.status(":shimmer[Checking the research so far...]", type="compact") as status:
+            status = st.status(":shimmer[Reading the request...]", type="compact")
+            route = route_request(cached_llm(), question, session_summary(d), callbacks=[counter])
+            status.update(label=f"{TYPE_LABELS.get(route.response_type, 'Clarification')} · "
+                                f"{CONTEXT_LABELS[route.context_mode]} · {route.reason}", state="complete")
+        scroll_to_bottom()
+    add_usage(counter)
+
+    if route.response_type == "clarification":
+        _ask_before_searching(idx, question, "clarify", route.reason, route)
+    elif fmode == FOLLOWUP_MODES[0]:  # Use current research
+        if route.needs_tools and route.context_mode != "answer_from_session":
+            _ask_before_searching(idx, question, "needs_tools", route.reason, route)
+        else:
+            followup_from_session(idx, question, route, bubble)
+    elif route.context_mode == "new_research":  # Research further, but it's a new topic
+        _ask_before_searching(idx, question, "new_topic", route.reason, route)
+    else:
+        followup_research_further(idx, question, bubble, show_question=False, route=route)
+
+
+def followup_from_session(idx: int, question: str, route, slot, force: bool = False, show_question: bool = False):
+    """Answer from the session's structured evidence: one model call, no tools, 0 new searches."""
+    route = _route(route) or Route(response_type="research", context_mode="answer_from_session",
+                                   needs_tools=False, reason="")
+    rtype = route.response_type if route.response_type != "clarification" else "explanation"
+    d = st.session_state.dossiers[idx]
+    counter = TokenCounter()
+    start = time.perf_counter()
+    pack = session_pack(d, question)
+    resp, error = None, None
+    with slot.container():
+        if show_question:
+            _user_message(question)
+            bubble = st.chat_message("assistant")
+        else:
+            bubble = st.container()
+        with bubble:
+            with st.status(":shimmer[Answering from the current research...]", type="compact") as status:
                 try:
-                    resp = answer_from_evidence(cached_llm(), evidence_pack(d), question, force, callbacks=[counter])
+                    resp = answer_from_session(cached_llm(), pack, question, rtype, force, callbacks=[counter])
                     if resp is None:
                         error = "The model returned no answer."
                 except Exception as e:
                     error = str(e)
-                status.update(label="Checked the research so far", state="error" if error else "complete")
+                status.update(label="Answered from the current research" if not error else "Couldn't answer",
+                              state="error" if error else "complete")
         scroll_to_bottom()
     add_usage(counter)
     seconds = time.perf_counter() - start
     if error:
         _append_failure(idx, question, "Answer from research", f"This follow-up couldn't be answered: {error}", seconds)
-        log_run("Answer from research", question, d["id"], seconds, counter, 0, "Failed", error=error)
-        return
-    if not force and resp.different_topic:
-        log_run("Answer from research", question, d["id"], seconds, counter, 0, "Different topic")
-        execute(question, None, bubble, idx=idx, show_question=False)
+        log_run("Answer from research", question, d["id"], seconds, counter, 0, "Failed", error=error,
+                context_chars=len(pack))
         return
     if not force and not resp.evidence_sufficient:
-        log_run("Answer from research", question, d["id"], seconds, counter, 0, "Needs more research")
-        followup_research_further(idx, question, bubble, show_question=False)
+        log_run("Answer from research", question, d["id"], seconds, counter, 0, "Needs more research",
+                context_chars=len(pack))
+        _ask_before_searching(idx, question, "insufficient", resp.missing, route)
         return
-    new_card = _known_sources_only(_strip_followup_fields(resp), d["sources"])
-    _append_answer(idx, question, new_card, [], "Answer from research", seconds, counter)
+    allowed = {_key(i["url"] or i["title"]) for i in d["evidence_items"]} | \
+              {_key(s["url"] or s["title"]) for s in d["sources"]}
+    new_card = _finalize(resp, allowed, d["evidence"], "answer_from_session", 0)
+    _append_answer(idx, question, new_card, [], "Answer from research", seconds, counter, bubble,
+                   "answer_from_session", route.model_dump(), len(pack))
 
 
-def followup_research_further(idx: int, question: str, slot, show_question: bool = True):
-    """Fetch only the missing evidence (small search budget), then answer below the earlier turns."""
+def followup_research_further(idx: int, question: str, slot, show_question: bool = True, route=None):
+    """Fetch only the missing evidence (at most FURTHER_MAX_LOOKUPS searches), then answer as a
+    new message in the same session."""
+    route = _route(route)
+    rtype = route.response_type if route and route.response_type != "clarification" else "research"
     d = st.session_state.dossiers[idx]
     counter = TokenCounter()
     pending: list = []
     start = time.perf_counter()
     result, error, new_card = None, None, None
+    pack = session_pack(d, question)
     with slot.container():
         if show_question:
             _user_message(question)
         bubble = st.chat_message("assistant") if show_question else st.container()
-        live = bubble.status(":shimmer[Searching for what's missing...]", type="compact")
+        live = bubble.status(f":shimmer[Researching further (up to {FURTHER_MAX_LOOKUPS} searches)...]",
+                             type="compact")
         scroll_to_bottom()
         executor = build_agent_executor(cached_llm(), _tools(pending, lookup_budget=FURTHER_MAX_LOOKUPS),
                                         max_iterations=FURTHER_MAX_LOOKUPS + 2, max_execution_time=90)
         try:
             result = run_research(
-                executor, research_further_instructions(evidence_pack(d), question, FURTHER_MAX_LOOKUPS),
+                executor, research_further_instructions(pack, question, rtype, FURTHER_MAX_LOOKUPS)
+                + rules_instruction(),
                 None, callbacks=[LiveProgress(live, "Writing the answer"), counter],
+                context=_run_context(d["id"], route, FURTHER_MAX_LOOKUPS),
             )
             new_card = result.response
             if new_card is None:
                 # Budget ran out before a final answer: keep what was found, answer from the evidence.
-                _add_evidence(d, result.steps)
+                _add_evidence(d, result.steps, question)
                 live.update(label=":shimmer[Writing the answer from what was found...]")
-                resp = answer_from_evidence(cached_llm(), evidence_pack(d), question, True, callbacks=[counter])
-                new_card = _strip_followup_fields(resp) if resp else None
+                resp = answer_from_session(cached_llm(), session_pack(d, question), question, rtype, True,
+                                           callbacks=[counter])
+                new_card = resp
             if new_card is None:
                 error = result.error or "No answer was produced."
             live.update(label="Research failed" if error else "Done", state="error" if error else "complete")
@@ -856,12 +1314,15 @@ def followup_research_further(idx: int, question: str, slot, show_question: bool
     steps = result.steps if result else []
     _attach_saves(pending, d, question)
     if error or new_card is None:
-        _add_evidence(d, steps)
+        _add_evidence(d, steps, question)
         _append_failure(idx, question, "Research further", f"Researching further didn't finish: {error}", seconds)
         log_run("Research further", question, d["id"], seconds, counter,
-                len([s for s in steps if s.tool in LOOKUP_TOOLS]), "Failed", error=error)
+                len([s for s in steps if s.tool in LOOKUP_TOOLS]), "Failed", error=error, context_chars=len(pack))
         return
-    _append_answer(idx, question, new_card, steps, "Research further", seconds, counter)
+    lookups = [s for s in steps if s.tool in LOOKUP_TOOLS and not s.output.startswith("Search budget")]
+    new_card = _finalize(new_card, None, d["evidence"] + lookups, "research_further", len(lookups))
+    _append_answer(idx, question, new_card, steps, "Research further", seconds, counter, bubble,
+                   "research_further", route.model_dump() if route else None, len(pack))
 
 
 # ---------- Components ----------
@@ -878,7 +1339,8 @@ def render_empty_state(disabled: bool):
     """Welcome screen with the chat bar centered on the page. Returns a submitted prompt."""
     st.space(96)
     st.title("What should I research?", text_alignment="center")
-    st.caption("Ask anything, or start with one of the topics below.", text_alignment="center")
+    st.caption("Every claim is checked against the passage it came from, and anything unsupported is "
+               "flagged for your review.", text_alignment="center")
     # Inside a container, chat_input renders inline (centered here) instead of pinned to the bottom.
     with st.container():
         typed = composer(disabled)
@@ -913,27 +1375,47 @@ def render_plan_card():
     """Returns (query, steps, context) once the user approves the plan."""
     plan = st.session_state.pending_plan
     _working_header("Awaiting approval", plan["query"])
-    st.caption("Here's how I'd research this. Adjust anything, then start.")
+    st.caption("Here's how I'd research this. Reorder, edit, add or remove steps, then start. "
+               "The approved plan is kept with the case.")
 
     current = []
+    last = len(plan["steps"])
     for n, s in enumerate(plan["steps"], 1):
         with st.container(border=True):
-            with st.container(horizontal=True, vertical_alignment="center"):
+            with st.container(horizontal=True, vertical_alignment="center", gap="small"):
                 st.markdown(f"**Step {n}**")
                 st.space("stretch")
-                st.button("Remove", type="tertiary", key=f"del_{s['sid']}",
+                st.button(":material/arrow_upward:", type="tertiary", key=f"up_{s['sid']}", help="Move up",
+                          on_click=move_plan_step, args=(s["sid"], -1), disabled=n == 1)
+                st.button(":material/arrow_downward:", type="tertiary", key=f"down_{s['sid']}", help="Move down",
+                          on_click=move_plan_step, args=(s["sid"], 1), disabled=n == last)
+                st.button(":material/close:", type="tertiary", key=f"del_{s['sid']}",
                           help=f"Remove step {n}", on_click=remove_plan_step, args=(s["sid"],))
+            if s.get("why"):
+                st.caption(f"Why: {s['why']}")
             q = st.text_input(f"Step {n} question", value=s["question"], key=f"q_{s['sid']}",
                               label_visibility="collapsed", placeholder="What should this step find out?",
                               persist_state="session")
-            srcs = st.segmented_control(f"Step {n} sources", plan["allowed"], selection_mode="multi",
-                                        default=s["sources"], key=f"src_{s['sid']}",
-                                        persist_state="session")
+            with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+                srcs = st.segmented_control(f"Step {n} sources", plan["allowed"], selection_mode="multi",
+                                            default=s["sources"], key=f"src_{s['sid']}",
+                                            persist_state="session", label_visibility="collapsed")
+                st.space("stretch")
+                priority = st.segmented_control(f"Step {n} priority", ["Required", "Optional"],
+                                                default=s.get("priority", "Required"), required=True,
+                                                key=f"pri_{s['sid']}", persist_state="session",
+                                                label_visibility="collapsed")
             if not srcs:
                 st.caption(":orange[Pick at least one source for this step.]")
             elif s.get("expected"):
                 st.caption(f"Looking for: {s['expected']}")
-            current.append({"question": (q or "").strip(), "sources": list(srcs or [])})
+            question = (q or "").strip()
+            origin = s.get("origin", "agent")
+            if origin == "agent" and question != s["question"]:
+                origin = "edited by you"
+            current.append({"question": question, "sources": list(srcs or []), "priority": priority or "Required",
+                            "why": s.get("why", ""), "expected": s.get("expected", ""),
+                            "origin": {"agent": "drafted by agent", "you": "added by you"}.get(origin, origin)})
 
     steps = [s for s in current if s["question"]]
     missing_source = any(not s["sources"] for s in steps)
@@ -951,11 +1433,13 @@ def render_plan_card():
 _SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
-def _sup(i: int, sources: list[str]) -> str:
-    """A small superscript citation, linked to its source when it's a URL."""
+def _sup(i: int, sources: list) -> str:
+    """A small superscript citation, linked to its source when it has a URL."""
     mark = str(i).translate(_SUPERSCRIPT)
-    if 1 <= i <= len(sources) and sources[i - 1].strip().startswith("http"):
-        return f"[{mark}]({sources[i - 1].strip()})"
+    if 1 <= i <= len(sources):
+        url = sources[i - 1].url if hasattr(sources[i - 1], "url") else sources[i - 1]
+        if url and str(url).startswith("http"):
+            return f"[{mark}]({url})"
     return mark
 
 
@@ -991,26 +1475,34 @@ def _reveal(text: str):
 
 def turn_status(t: dict) -> str:
     """One line under each answer saying how it was produced."""
-    if t["route"] == "New research":
-        base = f"Researched · {_plural(t['searches'], 'lookup')}"
-    elif t["searches"] == 0:
+    mode_ = t.get("context_mode", "new_research")
+    if mode_ == "direct":
+        base = "Answered directly · no research needed"
+    elif mode_ == "answer_from_session":
         base = "Answered from existing research · 0 new searches"
-    else:
+    elif mode_ == "research_further":
         base = f"Researched further · {_plural(t['searches'], 'new search')}"
-    if t["new_sources"] and t["route"] != "New research":
-        base += f" · {_plural(t['new_sources'], 'new source')}"
+        if t["new_sources"]:
+            base += f" · {_plural(t['new_sources'], 'new source')}"
+    else:
+        base = f"Researched · {_plural(t['searches'], 'lookup')}"
     return f"{base} · {t['time']}"
 
 
-def _source_line(c: ResearchResponse) -> str:
-    """One compact line of numbered source links, e.g. '¹ nature.com · ² wikipedia.org'."""
-    items = []
-    for i, s in enumerate(c.sources, 1):
-        s = s.strip()
-        label = domain(s) if s.startswith("http") else s
-        items.append(f"{str(i).translate(_SUPERSCRIPT)} [{label}]({s})" if s.startswith("http")
-                     else f"{str(i).translate(_SUPERSCRIPT)} {label}")
-    return " · ".join(items)
+def _comparison_table(c: Answer, cite: bool = False) -> str:
+    rows = c.comparison or []
+    options = list(dict.fromkeys(r.option for r in rows))
+    aspects = list(dict.fromkeys(r.aspect for r in rows))
+    cell = {(r.aspect, r.option): r.value for r in rows}
+
+    def fmt(v: str) -> str:
+        v = _inline_citations(v, c.sources) if cite else v
+        return v.replace("|", "\\|").replace("\n", " ")
+
+    lines = ["| | " + " | ".join(fmt(o) for o in options) + " |", "|---" * (len(options) + 1) + "|"]
+    for a in aspects:
+        lines.append(f"| **{fmt(a)}** | " + " | ".join(fmt(cell.get((a, o), "–")) for o in options) + " |")
+    return "\n".join(lines)
 
 
 def scroll_to_bottom():
@@ -1034,6 +1526,8 @@ def _render_turn(idx: int, n: int, t: dict, last: bool, locked: bool):
 
 
 def _render_answer(idx: int, n: int, t: dict, last: bool, locked: bool):
+    """One standard card for every answer type: header, direct answer (code, verdict or
+    comparison as needed), details, evidence, status, claims, and next steps."""
     c = t["card"]
     if c is None:
         st.error(t["error"] or "No answer was produced.")
@@ -1045,72 +1539,268 @@ def _render_answer(idx: int, n: int, t: dict, last: bool, locked: bool):
                       args=(t["question"],), key=f"retry_{idx}_{n}", disabled=locked)
         return
 
-    answer = _inline_citations(c.answer, c.sources)
+    # Header: [type] · language or topic          [Copy] [Save]
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.badge(TYPE_LABELS.get(c.response_type, "Answer"), color=TYPE_COLORS.get(c.response_type, "gray"))
+        st.caption(c.code.language if c.code else c.title)
+        st.space("stretch")
+        with st.popover("Copy", type="tertiary", icon=":material/content_copy:", disabled=locked):
+            st.code(_card_markdown(c), language="markdown", wrap_lines=True, height=220)
+        st.button("Save", type="tertiary", icon=":material/bookmark_add:", key=f"save_turn_{idx}_{n}",
+                  on_click=save_turn, args=(idx, n), disabled=locked)
+
+    # Direct answer
+    answer = _inline_citations(c.direct_answer, c.sources)
     if t.pop("fresh", False) and last and not locked and "```" not in answer and "|" not in answer:
         _reveal(answer)
     else:
         st.markdown(answer)
+    if c.verdict:
+        label, color = VERDICT_LABELS[c.verdict]
+        st.markdown(f":{color}-badge[Verdict: {label}]")
+    if c.code:
+        if c.code.filename:
+            st.caption(c.code.filename)
+        st.code(c.code.code, language=c.code.language.lower().replace("c++", "cpp").replace("c#", "csharp"))
+        if c.code.run_instructions:
+            st.caption("Run")
+            st.code("\n".join(c.code.run_instructions), language="bash")
+        if c.code.expected_output:
+            st.caption("Expected output")
+            st.code(c.code.expected_output, language="text")
+        if c.code.explanation:
+            st.markdown("\n".join(f"- {_md(x)}" for x in c.code.explanation[:4]))
+    if c.comparison:
+        st.markdown(_comparison_table(c, cite=True))
 
-    if c.details:
-        st.markdown("\n".join(f"- {_inline_citations(f.text, c.sources)}{_citations(f.source_ids, c.sources)}"
-                              for f in c.details))
-    if c.summary:
-        st.markdown(_inline_citations(c.summary, c.sources))
+    # Details: only for answers that are research
+    if c.details and c.response_type in ("research", "comparison", "fact_check"):
+        st.caption("Details")
+        st.markdown("\n".join(f"- {_inline_citations(x, c.sources)}" for x in c.details))
 
-    meta = f"{c.answer_type} · {turn_status(t)}"
-    st.caption(f"{_source_line(c)}  \n{meta}" if c.sources else meta)
+    # Evidence: each cited source with the passage it was cited for
+    if c.sources:
+        st.caption("Evidence")
+        lines = []
+        for i, s in enumerate(c.sources, 1):
+            name = f"[{s.domain or s.title}]({s.url})" if s.url else _md(s.title)
+            what = f"“{_md(s.quote)}”" if s.quote else (_md(", ".join(s.supports)) if s.supports else "")
+            title = f" {_md(s.title)} ·" if s.title and s.title != s.domain else ""
+            lines.append(f"{_sup(i, c.sources)}{title} {name}" + (f" — supports: {what}" if what else ""))
+        st.markdown("  \n".join(lines))
+
+    st.caption(turn_status(t))
     grounded = t["checks"].get("grounded")
     if last and grounded and grounded[0] < grounded[1]:
         st.caption(f":orange[{grounded[1] - grounded[0]} of {grounded[1]} sources weren't in the results "
                    "the agent read. Treat them with care.]")
+    claims = t.get("claims") or []
+    if claims:
+        with st.expander(f"Claims · {claims_summary(claims)}", icon=":material/fact_check:"):
+            for k, cl in enumerate(claims):
+                _render_claim(idx, n, k, cl, locked, prefix="a")
+
+    # Next steps: only under the newest answer
+    dec = st.session_state.pending_decision
+    if last and c.follow_ups and not (dec and dec["idx"] == idx):
+        key = f"related_{idx}_{n}"
+        st.pills("Next steps", c.follow_ups[:3], key=key, on_change=pick_related, args=(key,), disabled=locked)
+
+
+def _md(text: str) -> str:
+    """Quoted source text shown as Markdown: keep $ from turning into maths."""
+    return text.replace("$", "\\$")
+
+
+def _render_claim(idx: int, n: int, k: int, c: dict, locked: bool, prefix: str, review: bool = True):
+    """One claim: verdict, the quoted passage behind it, any conflicting passage, and review."""
+    claim = f"~~{_md(c['claim'])}~~" if c["review"] == "rejected" else _md(c["claim"])
+    st.markdown(f":{VERDICT_COLORS[c['verdict']]}-badge[{c['verdict']}] {claim}")
+    if c["quote"]:
+        st.markdown(f"> “{_md(c['quote'])}”  \n> — {format_source(c['source']) if c['source'] else 'retrieved text'}")
+    if c["conflict_quote"]:
+        st.markdown(f":red-badge[Conflicting evidence] “{_md(c['conflict_quote'])}” — "
+                    f"{format_source(c['conflict_source']) if c['conflict_source'] else 'retrieved text'}")
+    if c["reason"]:
+        st.caption(c["reason"])
+    if not review or not (needs_review(c) or c["review"]):
+        return
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        if c["review"] is None:
+            st.button("Accept", type="tertiary", icon=":material/check:", key=f"{prefix}_acc_{idx}_{n}_{k}",
+                      on_click=review_claim, args=(idx, n, k, "accepted"), disabled=locked,
+                      help="Keep this claim: you've checked it yourself")
+            st.button("Reject", type="tertiary", icon=":material/close:", key=f"{prefix}_rej_{idx}_{n}_{k}",
+                      on_click=review_claim, args=(idx, n, k, "rejected"), disabled=locked,
+                      help="Mark this claim as wrong; it stays visible, struck through")
+        else:
+            st.caption(f"You {c['review']} this claim.")
+            st.button("Undo", type="tertiary", key=f"{prefix}_undo_{idx}_{n}_{k}",
+                      on_click=review_claim, args=(idx, n, k, None), disabled=locked)
 
 
 def render_session(idx: int, locked: bool = False):
-    """The research thread: every question with its answer, newest at the bottom.
+    """The research session: every question with its answer, newest at the bottom.
 
     `locked` disables every control while a follow-up is running.
     """
     d = st.session_state.dossiers[idx]
     c = card(d)
-    status = dossier_status(d)
-
-    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
-        if status != "Complete":
-            st.badge(status, color=STATUS_COLORS[status])
-        st.caption(f"{_plural(len(d['turns']), 'question')} · {_plural(len(d['sources']), 'source')} · "
-                   f"{_plural(len(d['evidence']), 'lookup')} · {d.get('depth', 'Standard')} depth")
-        st.space("stretch")
-        if c is not None:
-            with st.popover("More", type="tertiary", disabled=locked):
-                st.button("Save to library", type="tertiary", on_click=save_report, args=(idx,), key=f"save_{idx}")
-                st.download_button("Download as Markdown", data=report_markdown(d), type="tertiary",
-                                   file_name=f"{d['title'][:40].strip().replace(' ', '_') or 'research'}.md",
-                                   mime="text/markdown", key=f"dl_{idx}", on_click="ignore")
-                st.caption("Copy as Markdown")
-                st.code(report_markdown(d), language="markdown", wrap_lines=True, height=200)
-
-    if d["evidence"]:
-        with st.expander(f"Research steps · {_plural(len(d['evidence']), 'lookup')}"):
-            for s in d["evidence"]:
-                with st.expander(f"{step_name(s.tool)}: {s.tool_input[:80]}", type="step"):
-                    st.text(s.output[:2000] + ("…" if len(s.output) > 2000 else ""))
+    render_case_header(idx, d, c, locked)
 
     # Every message, oldest first. Earlier ones are only ever re-drawn, never replaced.
     fresh = d["turns"][-1].get("fresh", False)
     for n, t in enumerate(d["turns"]):
         _render_turn(idx, n, t, last=n == len(d["turns"]) - 1, locked=locked)
 
-    last = d["turns"][-1]["card"]
-    if last is not None and last.next_steps:
-        # Drawn disabled while locked rather than left out: leaving it out would keep the
-        # previous run's clickable copies on screen until the run ends.
-        # Compact chips that wrap tightly; picking one asks it as a follow-up.
-        key = f"related_{idx}_{len(d['turns'])}"
-        st.pills("Related", last.next_steps[:3], key=key, on_change=pick_related, args=(key,),
-                 disabled=locked)
+    dec = st.session_state.pending_decision
+    if dec and dec["idx"] == idx:
+        _render_decision(dec, locked)
 
     if fresh or locked:  # a new message just arrived, or one is being written below
         scroll_to_bottom()
+
+
+def _render_decision(dec: dict, locked: bool):
+    """A follow-up that needs the user's decision, shown as the next messages in the thread."""
+    _user_message(dec["question"])
+    with st.chat_message("assistant"):
+        kind = dec.get("kind")
+        if kind == "clarify":
+            st.markdown("Could you say a bit more about what you'd like? "
+                        + (f"_{dec['missing']}_" if dec.get("missing") else ""))
+            return
+        if kind == "new_topic":
+            st.markdown("This looks like a new topic, so it needs its own research rather than a few "
+                        "searches here.")
+            go = ("Start new research", "new", ":material/add:")
+            alt = (f"Research here anyway (up to {FURTHER_MAX_LOOKUPS} searches)", "further")
+        else:  # needs_tools / insufficient
+            st.info("This needs information that isn't in the current research. Switch to "
+                    f"**Research further** to add up to {FURTHER_MAX_LOOKUPS} sources.",
+                    icon=":material/search_off:")
+            go = (f"Research further (up to {FURTHER_MAX_LOOKUPS} searches)", "further", ":material/travel_explore:")
+            alt = ("Answer from what we have", "anyway")
+        if dec.get("missing"):
+            # "insufficient" carries what the evidence lacks; the others carry the router's reason.
+            reason = re.sub(r"^(Rule|Model):\s*", "", dec["missing"])
+            st.caption(("Missing: " if kind == "insufficient" else "Why: ") + reason[:1].upper() + reason[1:])
+        with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+            st.button(go[0], icon=go[2], on_click=decide, args=(go[1],), key="dec_go", disabled=locked)
+            st.button(alt[0], type="tertiary", on_click=decide, args=(alt[1],), key="dec_alt", disabled=locked)
+
+
+def render_case_header(idx: int, d: dict, c, locked: bool):
+    """Status line for the session, plus the case file: review queue, claims, conflicts, plan,
+    evidence and run trace."""
+    status = dossier_status(d)
+    claims, queue, confl = all_claims(d), review_queue(d), conflicts(d)
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.badge(status, color=STATUS_COLORS[status])
+        st.caption(" · ".join([_plural(len(d["sources"]), "source"), _plural(len(claims), "claim"),
+                               _plural(len(confl), "conflict"), f"v{d.get('version', 1)}"]))
+        st.space("stretch")
+        if c is not None:
+            with st.popover("Export", type="tertiary", icon=":material/download:", disabled=locked):
+                st.caption("Audit report: every answer with its claims, quoted evidence, sources, "
+                           "plan versions and run trace.")
+                st.download_button("Download audit report (.md)", data=report_markdown(d), type="tertiary",
+                                   file_name=f"{d['title'][:40].strip().replace(' ', '_') or 'research'}_audit.md",
+                                   mime="text/markdown", key=f"dl_{idx}", on_click="ignore")
+                st.button("Save to library", type="tertiary", on_click=save_report, args=(idx,), key=f"save_{idx}")
+
+    if not (claims or d["evidence"] or d.get("plans")):
+        return
+    with st.expander("Case file" + (f" · {len(queue)} to review" if queue else ""), icon=":material/folder_open:"):
+        tabs = st.tabs([f"Review · {len(queue)}", f"Claims · {len(claims)}", f"Conflicts · {len(confl)}",
+                        "Plan", f"Evidence · {len(d.get('evidence_items', []))}", "Trace"])
+        with tabs[0]:
+            if not queue:
+                st.caption("Nothing to review. Claims that aren't fully supported, or that conflict with "
+                           "another source, wait here for you to accept or reject.")
+            for n, k, cl in queue:
+                st.caption(f"From: {d['turns'][n]['question']}")
+                _render_claim(idx, n, k, cl, locked, prefix="q")
+                st.divider()
+        with tabs[1]:
+            if not claims:
+                st.caption("No claims checked yet.")
+            for n, t in enumerate(d["turns"]):
+                if t.get("claims"):
+                    st.markdown(f"**{t['question']}**")
+                    st.caption(claims_summary(t["claims"]))
+                    for k, cl in enumerate(t["claims"]):
+                        _render_claim(idx, n, k, cl, locked, prefix="l", review=False)
+        with tabs[2]:
+            if not confl:
+                st.caption("No conflicting evidence found. When one source contradicts a claim, both "
+                           "passages are shown here side by side.")
+            for n, k, cl in confl:
+                st.markdown(f"**{_md(cl['claim'])}**")
+                left, right = st.columns(2)
+                with left:
+                    st.caption("Supporting")
+                    st.markdown(f"“{_md(cl['quote'])}”  \n{format_source(cl['source'])}" if cl["quote"]
+                                else "_No supporting passage found._")
+                with right:
+                    st.caption("Contradicting")
+                    st.markdown(f"“{_md(cl['conflict_quote'])}”  \n{format_source(cl['conflict_source'])}")
+        with tabs[3]:
+            _render_plans(d)
+        with tabs[4]:
+            items = d.get("evidence_items", [])
+            if not items:
+                st.caption("No evidence gathered yet.")
+            else:
+                st.caption(f"{len(items)} evidence items from {_plural(len(d['evidence']), 'lookup')}. Follow-ups "
+                           f"are answered from the {PACK_ITEMS} most relevant, not from raw pages.")
+            for i in sorted(items, key=lambda x: x["confidence"], reverse=True):
+                src = f"[{i['domain']}]({i['url']})" if i["url"] else _md(i["title"])
+                st.markdown(f"**{_md(i['title'])}** · {src} · relevance {i['confidence']:.0%}  \n"
+                            f"“{_md(i['quote'])}”")
+            if d["evidence"]:
+                with st.expander("Raw lookups (audit trail)"):
+                    for s in d["evidence"]:
+                        with st.expander(f"{step_name(s.tool)}: {s.tool_input[:80]}", type="step"):
+                            st.text(s.output[:2000] + ("…" if len(s.output) > 2000 else ""))
+        with tabs[5]:
+            st.caption(f"Session (thread) id `{d.get('thread_id', d['id'])}` · every run below shares it.")
+            st.markdown(_trace_table(d))
+
+
+def _render_plans(d: dict):
+    plans = d.get("plans") or []
+    if not plans:
+        st.caption("No plan for this case: it ran in Auto-research mode. Choose **Review plan** in "
+                   "Settings to approve and edit a plan before research starts; it's kept here.")
+        return
+    for p in reversed(plans):
+        used = [t["question"] for t in d["turns"] if t.get("plan_version") == p["version"]]
+        st.markdown(f"**Plan v{p['version']}** · approved {p['time']}" + (f" · used for “{used[0]}”" if used else ""))
+        for i, s in enumerate(p["steps"], 1):
+            st.markdown(f"{i}. {s['question']}  \n:gray[{', '.join(s['sources'])} · {s.get('priority', 'Required')}"
+                        f" · {s.get('origin', 'drafted by agent')}]")
+            if s.get("why"):
+                st.caption(f"Why: {s['why']}")
+
+
+def _cell(x) -> str:
+    return str(x).replace("|", "\\|").replace("\n", " ")
+
+
+def _trace_table(d: dict) -> str:
+    runs = [r for r in st.session_state.runs if r.get("session") == d["id"]]
+    if not runs:
+        return "_No runs recorded for this case._"
+    rows = ["| Time | Step | Status | Lookups | Context sent | Tokens | Seconds | Model | Prompt | Source rules |",
+            "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in runs:
+        rows.append("| " + " | ".join(_cell(x) for x in [
+            r.get("timestamp", r["time"]), r["kind"], r["status"], r["searches"],
+            f"{r.get('context_chars', 0):,} chars" if r.get("context_chars") else "–",
+            f"{r['tokens_in'] + r['tokens_out']:,}", f"{r['seconds']:.0f}", r.get("model", "–"),
+            r.get("prompt_version", "–"), r.get("rules", "–")]) + " |")
+    return "\n".join(rows)
 
 
 def render_approval_notice(disabled: bool = False):
