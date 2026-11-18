@@ -6,7 +6,12 @@ Built with [LangChain](https://www.langchain.com/), Google Gemini and [Streamlit
 
 ## Features
 
-- **Plan review**: the agent breaks your question into 2–4 sub-questions, each with a source (Web, Wikipedia or both). You can edit, add or remove steps before it runs. Switch to **Auto-research** to skip this step.
+- **Three research modes** (sidebar):
+  - **Ask first**: the agent asks up to two clarifying questions if your request is ambiguous, then proposes a plan.
+  - **Review plan**: the agent breaks your question into sub-questions, each with its sources, for you to edit and approve.
+  - **Auto-research**: plans and runs without stopping.
+- **Choose your sources**: web search, Wikipedia, and your own uploaded documents (PDF, TXT, Markdown).
+- **Depth**: Quick, Standard or Deep. Each sets how many lookups the agent makes, how long the report is, and a step and time limit for the run.
 - **Live progress**: a one-line progress strip shows what the agent is doing (`✓ Web search · Reading Wikipedia...`). Expand it to see each tool call.
 - **Structured reports** with:
   - a one-sentence answer
@@ -16,6 +21,12 @@ Built with [LangChain](https://www.langchain.com/), Google Gemini and [Streamlit
 - **Act on findings**: each finding has **Explore**, **Check sources** and **Ask follow-up** buttons.
 - **Approval before saving**: the agent can only *request* to save a file. Nothing is saved until you approve it on the **Approvals** page.
 - **Library**: every report from the session, plus files you've saved. Saves are private to each visitor's session; download anything you want to keep.
+- **Runs & quality**: every run with timing, tokens and three automatic checks:
+  - valid report format
+  - sources grounded (each cited source appears in what the tools returned)
+  - plan followed
+- **Usage tracking**: token counts from every model call, and a cost estimate once you enter prices under **Settings**.
+- **Prompt-injection guard**: text returned by tools is treated as reference material, never as instructions.
 - **CLI mode**: `main.py` runs the same agent in the terminal and prints JSON.
 
 ## Getting started
@@ -89,7 +100,8 @@ Tool failures, such as a search timeout, are returned to the agent as messages i
 ├── app_pages/
 │   ├── research.py         # Ask, review plan, watch progress, read report
 │   ├── library.py          # Past reports and saved files
-│   └── approvals.py        # Pending file-save requests
+│   ├── approvals.py        # Pending file-save requests
+│   └── runs.py             # Run history, usage and quality checks
 ├── studio.py               # Shared state, live progress handler, UI components
 ├── agent.py                # LLM, prompt, response schema, planner, parser
 ├── tools.py                # Web search, Wikipedia and save tools
@@ -105,6 +117,8 @@ Tool failures, such as a search timeout, are returned to the agent as messages i
 |---|---|
 | Gemini model | `MODEL_NAME` in `agent.py` |
 | Search engines | `backend=` in `tools.py` |
+| Depth presets (lookups, step and time limits) | `DEPTHS` in `studio.py` |
+| Default token prices for cost estimates | `PRICE_INPUT_PER_M` and `PRICE_OUTPUT_PER_M` environment variables or secrets |
 | Theme colors and font | `.streamlit/config.toml` |
 
 ## Deploy to Streamlit Community Cloud
