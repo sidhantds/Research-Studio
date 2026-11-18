@@ -3,12 +3,37 @@
 Ask -> review plan -> watch research -> read & act on report.
 """
 
+import importlib
 import os
 
 import streamlit as st
 
-import studio as s
-from agent import MODEL_NAME
+import agent
+import studio
+import tools
+
+
+def _reload_changed_modules():
+    """Reload helper modules whose files changed since they were imported.
+
+    Streamlit reruns this script on every interaction but keeps imported modules in memory.
+    After a code update (a git push to Streamlit Cloud, or an edit while running locally),
+    the new app.py could otherwise run against the old studio.py and crash. Reloads go in
+    dependency order (tools -> agent -> studio) so each picks up the fresh version below it.
+    """
+    changed = False
+    for mod in (tools, agent, studio):
+        path = str(mod.__file__)
+        mtime = os.path.getmtime(path)
+        if changed or getattr(mod, "_loaded_mtime", mtime) != mtime:
+            importlib.reload(mod)
+            changed = True  # modules that import this one must reload too
+        setattr(mod, "_loaded_mtime", os.path.getmtime(path))
+
+
+_reload_changed_modules()
+s = studio
+MODEL_NAME = agent.MODEL_NAME
 
 st.set_page_config(
     page_title="Research Studio",
