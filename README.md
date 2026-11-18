@@ -1,213 +1,262 @@
-# Research Studio
+<p align="center">
+  <img src="assets/banner.svg" alt="Research Studio" width="100%">
+</p>
 
-**Research Studio turns a question into a reviewable research case:** each claim is checked against the passage it came from, unsupported claims are flagged for review, plans are editable and versioned, any file save waits for your approval, and the whole case exports as an audit report.
+<h1 align="center">Research Studio</h1>
 
-ChatGPT and Perplexity answer questions. Research Studio keeps a research case you can audit: the plan, the claims, the evidence behind each one, the conflicts, your review decisions and a trace of every run. You work on the case through chat.
+<p align="center">
+  <b>An AI research agent that turns a question into a case you can audit, with every claim checked word for word against its source.</b>
+</p>
 
-Built with [LangChain](https://www.langchain.com/), Google Gemini and [Streamlit](https://streamlit.io/).
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11+-101214?style=flat-square&logo=python&logoColor=4C8DF6">
+  <img alt="Streamlit" src="https://img.shields.io/badge/streamlit-1.67-101214?style=flat-square&logo=streamlit&logoColor=FF4B4B">
+  <img alt="LangChain" src="https://img.shields.io/badge/langchain-1.8-101214?style=flat-square&logo=langchain&logoColor=E7EAED">
+  <img alt="Gemini" src="https://img.shields.io/badge/gemini-flash--lite-101214?style=flat-square&logo=googlegemini&logoColor=4C8DF6">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-101214?style=flat-square&labelColor=101214&color=4ADE80"></a>
+</p>
 
-## Features
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#core-workflow">Workflow</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#evaluation">Evaluation</a> ·
+  <a href="#roadmap">Roadmap</a>
+</p>
 
-### Evidence you can check
+<p align="center">
+  <img src="assets/preview.svg" alt="Research Studio: answer card with claim verdicts, case file and follow-up modes" width="100%">
+</p>
 
-- **Claim-level verification.** After each answer, a separate model call splits it into claims (up to 8). It quotes the passage behind each claim and gives a verdict: *Supported*, *Partially supported*, *Unsupported* or *Insufficient evidence*. The app then checks every quote **word for word** against the text the search tools actually returned. A claim whose quote isn't there is downgraded, so the model never grades its own work unchecked.
-- **Conflicts.** When one source contradicts a claim, both passages are shown side by side.
-- **Review queue.** Claims that aren't fully supported, or that conflict, wait for you to **Accept** or **Reject**. The case shows *Needs review* until the queue is clear.
-- **Evidence on every answer.** Each cited source appears under the answer with the passage it was cited for. A quote is shown only if it appears word for word in the retrieved text, and sources the session never retrieved are dropped.
-- **Source rules** (Settings). *Only use these domains*, *Never use these domains* and *Recency* (past year, month or week). The domain rules are enforced in code on every search result, not just suggested to the model.
+<!-- Swap the preview above for a real recording when you have one:
+     <img src="assets/demo.gif" alt="Research Studio demo" width="100%">
+     and add a live link under it:
+     [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://your-app.streamlit.app) -->
 
-### Answers shaped to the question
+---
 
-- **Intent routing.** Each request is classified before anything runs: code, explanation, research, comparison, fact check or clarification. Keyword rules handle the clear cases with no model call; only ambiguous requests use one fast structured call.
-- **No research when none is needed.** "Generate hello world in Java" is answered directly: one call, no searches, no sources.
-- **One answer card for every type.** A header with the type, Copy and Save; then the direct answer:
-  - code, with filename, run commands and expected output
-  - a verdict, for fact checks
-  - a comparison table, for comparisons
+## Why it is different
 
-  Then details (research, comparisons and fact checks only), evidence, a status line and next-step suggestions.
+Chat assistants give you an answer. Research Studio gives you a **research case**: the plan, the claims, the evidence behind each one, the conflicts, your review decisions and a trace of every run.
 
-### Follow-ups that don't waste tokens
+|  | Chat assistants | **Research Studio** |
+|---|:---:|:---:|
+| Cites sources | ✓ | ✓ |
+| Checks each claim's quote against the text actually retrieved | — | ✓ |
+| Sends unsupported or conflicting claims to a review queue | — | ✓ |
+| Follow-ups that reuse evidence instead of searching again | — | ✓ |
+| Editable, versioned research plans | — | ✓ |
+| Exports a full audit report | — | ✓ |
 
-- **Follow-up mode**, above the chat bar:
-  - **Use current research** (default) answers from what the session already found. It never searches. If new facts are needed, it says so and offers to research further.
-  - **Research further** adds up to 2 new searches in the same session.
-  - **New research** starts a separate research case.
+The goal isn't "100% accurate". It's that **every material claim is traceable to inspectable evidence, and unsupported claims are flagged.**
 
-  After any search, the mode returns to *Use current research*, so searching is always a deliberate choice.
-- **One session per case.** Follow-ups keep the same session id (`thread_id`) and bump its version. Each answer is added below the earlier ones, and only new sources are added. Every answer says how it was produced, e.g. *Answered from existing research · 0 new searches*.
-- **Structured evidence.** Each lookup is compressed into small items: the key sentence, a word-for-word quote, URL, retrieval time and a relevance score. A follow-up gets the original question, the current answer (and code), the 8 most relevant items and the question itself. Raw pages and the full chat history are never re-sent.
-
-### The research case
-
-- **Case header:** status · sources · claims · conflicts · version.
-- **Case file**, in six tabs:
-  - **Review:** claims waiting for you to accept or reject
-  - **Claims:** every claim, with its verdict
-  - **Conflicts:** the supporting and contradicting passages side by side
-  - **Plan:** every plan version
-  - **Evidence:** each evidence item, plus the raw lookups
-  - **Trace:** for each run, the time, step, lookups, context size, tokens, model, prompt version and source rules
-- **Plans** (Settings → Before researching → *Review plan*). Each step comes with the agent's reason for it. You can reorder, edit, add or remove steps, and mark them *Required* or *Optional*. Each step records whether the agent drafted it or you edited or added it. Approved plans are kept as numbered versions, each linked to the answer it produced. *Ask first* also asks up to two clarifying questions.
-- **Audit export.** A Markdown report with:
-  - case status, model and prompt version
-  - every answer with a claims table (claim, verdict, quoted evidence, source, review)
-  - conflicts
-  - appendices: plan versions, lookups and run trace
-
-### Also
-
-- **Sources and depth** (sidebar): Web, Wikipedia and uploaded Documents (PDF, TXT, Markdown); Quick, Standard or Deep.
-- **Live progress:** one line shows what the agent is doing (`✓ Web search · Reading Wikipedia...`); expand it to see each lookup.
-- **Approval before saving:** the agent can only *request* to save a file; nothing is written until you approve it.
-- **Library:** every research case, with its claim and review counts, plus files you've saved. Saves stay private to each visitor's browser session.
-- **Runs & quality:** every run with timing, tokens and automatic checks: valid format, sources grounded, plan followed, claims supported, and follow-ups answered without new searches. Optional cost estimate.
-- **Reliable search:** several search engines are tried in turn, each with a short timeout; repeat lookups are cached.
-- **Prompt-injection guard:** text returned by tools is treated as reference material, never as instructions.
-- **CLI mode:** `main.py` runs the agent in the terminal and prints the answer as JSON.
-
-## Getting started
-
-### Prerequisites
-
-- Python 3.11+
-- A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
-
-### Install
-
-```bash
-git clone https://github.com/sidhantds/Research-Studio.git
-cd Research-Studio
-
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS / Linux
-source venv/bin/activate
-
-pip install -r requirements.txt
-```
-
-### Configure
-
-Copy the example environment file and add your key:
-
-```bash
-cp .env.example .env
-```
-
-```env
-GOOGLE_API_KEY=your-google-api-key-here
-```
-
-### Run
-
-```bash
-python -m streamlit run app.py
-```
-
-Then open http://localhost:8501.
-
-To use the terminal version instead:
-
-```bash
-python main.py
-```
-
-## How it works
+## Core workflow
 
 ```text
-Question → Route → Answer directly, or research → Check claims → Case
-                                                                   ↓
-Follow-up → Route → Use current research | Research further (≤2) | New research
+ Ask  →  Route  →  Plan  →  Research  →  Answer  →  Verify  →  Review  →  Export
+         (type)   (opt.)    (tools)     (schema)   (claims)   (you)     (audit)
 ```
 
-1. **Route.** `route_request` in `agent.py` returns a `Route` with `response_type`, `context_mode`, `needs_tools` and a reason. Keyword rules come first; an LLM call is the fallback.
-2. **Plan (optional).** In *Review plan* mode, Gemini drafts sub-questions with a reason for each, as structured output (`make_plan`).
-3. **Research.** A LangChain tool-calling agent runs with:
-   - Web search (Yahoo, DuckDuckGo, Mojeek, Brave and Google, tried in turn), filtered by your source rules
-   - Wikipedia
-   - Your uploaded documents
-   - A save request that goes to the approval queue
+1. **Ask** a question in chat.
+2. **Route.** The request is typed as code, explanation, research, comparison, fact check or clarification. Simple requests skip research entirely.
+3. **Plan** *(optional).* Review, reorder and edit the agent's sub-questions before anything runs.
+4. **Research.** The agent searches the web, Wikipedia and your documents within your source rules.
+5. **Answer.** One structured answer card: direct answer, code, verdict or comparison table, plus sources.
+6. **Verify.** Claims are extracted and each quote is checked word for word against the retrieved text.
+7. **Review.** You accept or reject anything not fully supported.
+8. **Follow up or export.** Ask more questions (reusing the evidence), or export the case as a Markdown audit report.
 
-   Each run carries a `RunContext` (thread id, response type, depth, sources, rules, search budget) as LangChain run metadata.
-4. **Answer.** Every answer is parsed into one Pydantic `Answer` envelope: `response_type`, `title`, `direct_answer`, `details`, `code`, `comparison`, `verdict`, `sources`, `follow_ups`, `context_mode`, `new_searches`. If the output isn't valid JSON, the parser extracts the JSON from the reply. If that fails, it asks the model once to convert its answer.
-5. **Verify.** `check_claims` extracts claims and quotes evidence; the app confirms each quote in code and downgrades any it can't find.
-6. **Store.** Lookups are kept raw (for the audit trail and quote checks) and also compressed into evidence items by `evidence.py`. Follow-ups use the compressed items.
+## Key features
+
+- **Claim-level verification:** each claim is *Supported*, *Partially supported*, *Unsupported* or *Insufficient evidence*. A claim is downgraded if its quote can't be found in the retrieved text.
+- **Conflicts:** passages that contradict each other are shown side by side.
+- **Review queue:** the case shows *Needs review* until every flagged claim is accepted or rejected.
+- **Intent routing:** keyword rules handle clear cases with no model call. Only ambiguous requests use one fast LLM call.
+- **Token-efficient follow-ups:** *Use current research* never searches, *Research further* allows at most 2 new searches, and *New research* starts a new case.
+- **Versioned plans:** each step records why the agent added it and whether you edited it. Each plan version is linked to the answer it produced.
+- **Source rules:** allow and deny lists of domains, plus a recency filter. The domain rules are enforced in code on every search result.
+- **Case file:** six tabs: Review, Claims, Conflicts, Plan, Evidence and Trace.
+- **Audit export:** a Markdown report with a claims table, conflicts, plan versions, lookups and the run trace.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Q([Question]) --> R{Router}
+    R -- code / explain --> N
+    R -- research / compare / fact check --> P[Planner]
+    P --> A[Tool-calling agent]
+    A <--> T[[Web · Wikipedia · Docs · Save request]]
+    A --> N[Answer schema]
+    N --> V[Claim checker]
+    V --> C[(Research case)]
+    C --> F([Follow-up])
+    F -- use current research --> N
+    F -- research further ≤2 --> A
+    F -- new research --> R
+
+    classDef accent fill:#4C8DF6,stroke:#4C8DF6,color:#fff
+    classDef store fill:#171A1D,stroke:#4ADE80,color:#E7EAED
+    class V accent
+    class C store
+```
+
+| Component | Responsibility | Code |
+|---|---|---|
+| **Router** | Returns a `Route` (`response_type`, `context_mode`, `needs_tools`, reason). Keyword rules first, LLM fallback | `route_request` · `agent.py` |
+| **Planner** | Structured sub-questions with a reason for each | `make_plan` · `agent.py` |
+| **Agent** | LangChain tool-calling agent. Each run carries a `RunContext` (thread, depth, sources, rules, budget) | `agent.py` |
+| **Tools** | Tries 5 search engines in turn with short timeouts and caching; also Wikipedia, documents and the save request | `tools.py` |
+| **Answer schema** | One Pydantic `Answer` envelope for every response type. If the reply isn't valid JSON, it is repaired once | `agent.py` |
+| **Claim checker** | Splits the answer into up to 8 claims, then checks each quote in code | `check_claims` · `agent.py` |
+| **Evidence store** | Keeps raw lookups for the audit trail, plus compact evidence items for follow-ups | `evidence.py` |
+| **UI** | Sessions, answer card, case file, export, Runs & quality | `studio.py`, `app_pages/` |
 
 Tool failures, such as a search timeout, come back to the agent as messages instead of exceptions, so it can try another source.
 
-## Project structure
+## Quickstart
 
-```text
-├── app.py                  # Entry point: page config, navigation, sidebar, settings
-├── app_pages/
-│   ├── research.py         # The research session: chat, follow-up modes, jobs
-│   ├── library.py          # Research cases and saved files
-│   ├── approvals.py        # Pending file-save requests
-│   └── runs.py             # Run history, usage and quality checks
-├── studio.py               # Sessions, research runs, claim checks, answer card, case file, export
-├── agent.py                # Intent router, Answer schema, prompts, agent, planner, claim checker, parser
-├── evidence.py             # Evidence items and the compact follow-up context
-├── tools.py                # Web search, Wikipedia, documents, source rules, save tool
-├── main.py                 # Command-line interface
-├── CHANGELOG.md            # What changed, and what's planned
-├── .streamlit/config.toml  # Dark theme
-├── .env.example            # Environment variable template
-└── requirements.txt
+```bash
+git clone https://github.com/sidhantds/Research-Studio.git && cd Research-Studio
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env                              # then add GOOGLE_API_KEY
+python -m streamlit run app.py
 ```
+
+Open **http://localhost:8501**. You need Python 3.11+ and a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey).
+
+**Terminal mode:** `python main.py` asks for a question and prints the `Answer` as JSON.
 
 ## Configuration
 
 | What | Where |
 |---|---|
-| Gemini model | `MODEL_NAME` in `agent.py` |
-| Prompt version (recorded in traces and exports) | `PROMPT_VERSION` in `agent.py` |
+| API key | `GOOGLE_API_KEY` in `.env` (or Streamlit secrets) |
+| Gemini model · prompt version | `MODEL_NAME` · `PROMPT_VERSION` in `agent.py` |
 | Routing keyword rules | `_RULES`, `_CODE_VERB`, `_CODE_NOUN`, `_FRESH` in `agent.py` |
 | Search engines and timeouts | `_ENGINES`, `_ENGINE_TIMEOUT` in `tools.py` |
-| Depth presets (lookups, step and time limits) | `DEPTHS` in `studio.py` |
-| "Research further" search budget | `FURTHER_MAX_LOOKUPS` in `studio.py` |
-| Evidence items sent with a follow-up | `PACK_ITEMS` in `evidence.py` |
-| Source rules and recency | Settings in the app |
-| Default token prices for cost estimates | `PRICE_INPUT_PER_M` and `PRICE_OUTPUT_PER_M` environment variables or secrets |
-| Theme colors and font | `.streamlit/config.toml` |
+| Depth presets · "Research further" budget | `DEPTHS` · `FURTHER_MAX_LOOKUPS` in `studio.py` |
+| Evidence items per follow-up | `PACK_ITEMS` in `evidence.py` |
+| Token prices for cost estimates | `PRICE_INPUT_PER_M`, `PRICE_OUTPUT_PER_M` env vars |
+| Source rules and recency | **Settings** in the app |
+| Theme | `.streamlit/config.toml` |
 
-## Deploy to Streamlit Community Cloud
+## Using the app
 
-1. Push the repo to GitHub, then go to [share.streamlit.io](https://share.streamlit.io) and click **Create app**.
-2. Set **Main file path** to `app.py`.
-3. Under **Advanced settings**, choose Python **3.11** and add your key under **Secrets**:
+| Where | What you do there |
+|---|---|
+| **Sidebar** | Pick sources (Web, Wikipedia, uploaded PDF/TXT/Markdown) and depth (Quick, Standard, Deep) |
+| **Settings** | Pick a research mode: *Ask first*, *Review plan* or *Auto-research*. Also set source rules and recency |
+| **Research** | Chat, choose a follow-up mode above the chat bar, review claims in the case file, export |
+| **Library** | Every research case with claim and review counts, plus saved files |
+| **Approvals** | Approve or skip file-save requests from the agent |
+| **Runs & quality** | Timing, tokens, cost and quality checks for each run |
 
-   ```toml
-   GOOGLE_API_KEY = "your-google-api-key"
-   ```
+**Try these:**
 
-   Streamlit Cloud also exposes top-level secrets as environment variables, so no code changes are needed.
-4. Click **Deploy**.
+| Prompt | What happens |
+|---|---|
+| `Generate hello world in Java` | **Code**: one call, no searches; filename, run commands, expected output |
+| `Are sodium-ion batteries viable for grid storage?` | **Research**: claims checked, conflicts shown |
+| `Is the Great Wall visible from space?` | **Fact check**: a verdict with quoted evidence |
+| *(follow-up)* `Which one is cheaper?` | Answered from existing research: **0 new searches** |
 
-Every visitor's research runs on your API key. To control who can use it, make the app private under **Settings → Sharing** and invite people by email.
+## Evaluation
+
+Every run is scored automatically on the **Runs & quality** page:
+
+| Check | Passes when |
+|---|---|
+| **Valid format** | The reply parses into the `Answer` schema |
+| **Sources grounded** | Each cited source was actually retrieved in this session |
+| **Plan followed** | Every source a plan step required was actually used |
+| **Claims supported** | The share of claims marked *Supported* after quotes are checked in code |
+| **Follow-ups with no new search** | The share of follow-ups answered from evidence the session already had (higher means lower cost) |
+
+Each run's trace records the timestamp, step, lookups, context size, tokens, model, prompt version and source rules. That lets you compare runs across prompt or model changes.
+
+## Safety and permissions
+
+- **Approval before writing:** the agent can only *request* a file save. Nothing is written until you approve it in **Approvals**.
+- **Prompt-injection guard:** text from tools and evidence is passed to the model as reference material, never as instructions.
+- **Quotes checked in code:** the model never grades its own citations unchecked. Quotes it invents are caught and the claim is downgraded.
+- **Source rules enforced in code:** denied domains are filtered out of results, not just discouraged in the prompt.
+- **Human in the loop:** flagged claims stay in review until you decide on them.
+- **Your key, your data:** cases and saved files live in each visitor's browser session. On a public deploy, every visitor uses your API key, so make the app private under **Settings → Sharing**.
+
+## Project structure
+
+```text
+app.py            entry point: navigation, sidebar, settings
+app_pages/        research · library · approvals · runs
+studio.py         sessions, runs, claim checks, answer card, case file, export
+agent.py          router, Answer schema, prompts, agent, planner, claim checker
+evidence.py       evidence items and compact follow-up context
+tools.py          web search, Wikipedia, documents, source rules, save tool
+main.py           CLI
+assets/           README images
+```
+
+## Roadmap
+
+- [x] Editable, versioned plans
+- [x] Claim-level evidence with checked quotes
+- [x] Conflict handling and review queue
+- [x] Approval-gated file saves
+- [x] Quality scorecard and run trace
+- [ ] PDF export of the audit report
+- [ ] Read publication dates so recency is checked, not just requested
+- [ ] Edit a plan after it runs, re-run as v2 and compare answers
+- [ ] "Blocked" plan steps and explained mid-run plan changes
+- [ ] High-impact flag that always sends a claim to review
+- [ ] Persistent cases (storage and sign-in)
+
+The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 
-- Research cases live in the browser session; they're gone when the session ends. Export the audit report to keep one.
-- Recency is passed to the search engines as a date filter. The app doesn't read publication dates itself, and Wikipedia isn't date-filtered.
-- The audit export is Markdown only (no PDF yet).
+- Cases live in the browser session. Export the audit report to keep one.
+- Recency is passed to search engines as a date filter. Wikipedia isn't date-filtered.
+- The audit export is Markdown only for now.
 - Claim checks add one model call per answer (code answers skip it).
-- Verification makes each claim traceable to inspectable evidence. It doesn't guarantee the claim is true.
+- Verification makes claims *traceable*. It doesn't guarantee they're true.
 
-## Troubleshooting
+<details>
+<summary><b>Troubleshooting</b></summary>
 
-**`streamlit` command is blocked or not found (Windows)**
-Run it through Python instead: `python -m streamlit run app.py`.
+- **`streamlit` blocked or not found (Windows):** use `python -m streamlit run app.py`.
+- **`DLL load failed ... Application Control policy`:** Windows Smart App Control can block compiled packages such as pandas. The app avoids pandas, so it runs with the policy on.
+- **Search keeps failing:** reorder or trim `_ENGINES` in `tools.py`. Wikipedia still works.
+- **"No results from allowed sources":** your *Only use these domains* rule is too narrow.
+- **"No `GOOGLE_API_KEY` found":** put `.env` in the project root and restart.
 
-**`DLL load failed ... An Application Control policy has blocked this file`**
-Windows Smart App Control can block some compiled packages, such as pandas. The app avoids features that need pandas, so it runs with the policy on. If you add features that use pandas, you may need to adjust the policy.
+</details>
 
-**Search keeps failing**
-Some networks block certain search engines. The app tries several in turn; reorder or trim the `_ENGINES` list in `tools.py` to put the ones that work for you first. Wikipedia still works when web search fails.
+<details>
+<summary><b>Deploy to Streamlit Community Cloud</b></summary>
 
-**Every search returns "No results from allowed sources"**
-Your *Only use these domains* rule may be too narrow. Clear it in Settings, or add more domains.
+1. Push to GitHub, open [share.streamlit.io](https://share.streamlit.io) and choose **Create app**. Set the main file to `app.py`.
+2. Under **Advanced settings**, choose Python 3.11 and add `GOOGLE_API_KEY = "..."` under **Secrets**.
+3. Click **Deploy**.
 
-**"No `GOOGLE_API_KEY` found"**
-Make sure `.env` is in the project root and restart the app.
+</details>
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+1. Fork the repo and create a branch: `git checkout -b feature/your-idea`
+2. Keep changes focused, and note user-facing changes in `CHANGELOG.md`
+3. Run the app locally and check that research, follow-ups and the export still work
+4. Open a pull request describing what changed and why
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+---
+
+<p align="center">
+  Built with <a href="https://www.langchain.com/">LangChain</a>, Google Gemini and <a href="https://streamlit.io/">Streamlit</a>
+</p>

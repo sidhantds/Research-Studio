@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-label="Research Studio interface preview: an answer card with claim verdicts and the case file tabs">
+  <defs>
+    <style>
+      text { font-family: Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
+      .h { fill:#E7EAED; font-weight:600; }
+      .b { fill:#C9CFD5; }
+      .m { fill:#9AA4AE; }
+      .card { fill:#171A1D; stroke:#2A2F34; }
+      .bar { fill:#2A2F34; }
+    </style>
+  </defs>
+
+  <!-- window -->
+  <rect width="1200" height="640" rx="16" fill="#101214"/>
+  <rect x="0.5" y="0.5" width="1199" height="639" rx="16" fill="none" stroke="#2A2F34"/>
+  <circle cx="28" cy="26" r="6" fill="#F87171"/><circle cx="48" cy="26" r="6" fill="#FBBF24"/><circle cx="68" cy="26" r="6" fill="#4ADE80"/>
+  <text x="600" y="31" text-anchor="middle" class="m" font-size="13">localhost:8501 · Research Studio</text>
+  <line x1="0" y1="52" x2="1200" y2="52" stroke="#2A2F34"/>
+
+  <!-- sidebar -->
+  <rect x="0" y="53" width="230" height="586" fill="#171A1D"/>
+  <text x="24" y="92" class="h" font-size="16">Research Studio</text>
+  <g font-size="14">
+    <rect x="14" y="112" width="202" height="34" rx="8" fill="#1E2226"/>
+    <text x="28" y="134" fill="#4C8DF6" font-weight="600">Research</text>
+    <text x="28" y="174" class="m">Library</text>
+    <text x="28" y="210" class="m">Approvals</text>
+    <text x="28" y="246" class="m">Runs &amp; quality</text>
+  </g>
+  <text x="24" y="300" class="m" font-size="11" letter-spacing="1.5">SOURCES</text>
+  <g font-size="13" class="b">
+    <rect x="24" y="314" width="14" height="14" rx="3" fill="#4C8DF6"/><text x="46" y="326">Web</text>
+    <rect x="24" y="340" width="14" height="14" rx="3" fill="#4C8DF6"/><text x="46" y="352">Wikipedia</text>
+    <rect x="24" y="366" width="14" height="14" rx="3" fill="none" stroke="#2A2F34"/><text x="46" y="378">Documents</text>
+  </g>
+  <text x="24" y="420" class="m" font-size="11" letter-spacing="1.5">DEPTH</text>
+  <rect x="24" y="432" width="182" height="30" rx="8" fill="#1E2226" stroke="#2A2F34"/>
+  <text x="38" y="452" class="b" font-size="13">Standard</text>
+
+  <!-- case header -->
+  <text x="262" y="96" class="h" font-size="22">Sodium-ion batteries for grid storage</text>
+  <g font-size="13">
+    <rect x="262" y="112" width="104" height="26" rx="13" fill="#FBBF24" fill-opacity="0.14"/>
+    <text x="314" y="130" text-anchor="middle" fill="#FBBF24" font-weight="600">Needs review</text>
+    <text x="382" y="130" class="m">6 sources · 5 claims · 1 conflict · v2</text>
+  </g>
+
+  <!-- answer card -->
+  <rect x="262" y="156" width="560" height="440" rx="12" class="card"/>
+  <text x="286" y="190" class="m" font-size="12" letter-spacing="1.5">RESEARCH</text>
+  <text x="798" y="190" text-anchor="end" class="m" font-size="12">Copy · Save</text>
+  <text x="286" y="222" class="h" font-size="16">Direct answer</text>
+  <rect x="286" y="238" width="500" height="10" rx="5" class="bar"/>
+  <rect x="286" y="258" width="470" height="10" rx="5" class="bar"/>
+  <rect x="286" y="278" width="390" height="10" rx="5" class="bar"/>
+
+  <text x="286" y="324" class="h" font-size="15">Claims</text>
+  <g font-size="13">
+    <g transform="translate(286 344)">
+      <rect width="512" height="40" rx="8" fill="#101214" stroke="#2A2F34"/>
+      <circle cx="18" cy="20" r="5" fill="#4ADE80"/>
+      <rect x="34" y="15" width="300" height="10" rx="5" class="bar"/>
+      <text x="498" y="25" text-anchor="end" fill="#4ADE80" font-weight="600">Supported</text>
+    </g>
+    <g transform="translate(286 392)">
+      <rect width="512" height="40" rx="8" fill="#101214" stroke="#2A2F34"/>
+      <circle cx="18" cy="20" r="5" fill="#4ADE80"/>
+      <rect x="34" y="15" width="260" height="10" rx="5" class="bar"/>
+      <text x="498" y="25" text-anchor="end" fill="#4ADE80" font-weight="600">Supported</text>
+    </g>
+    <g transform="translate(286 440)">
+      <rect width="512" height="40" rx="8" fill="#101214" stroke="#2A2F34"/>
+      <circle cx="18" cy="20" r="5" fill="#FBBF24"/>
+      <rect x="34" y="15" width="280" height="10" rx="5" class="bar"/>
+      <text x="498" y="25" text-anchor="end" fill="#FBBF24" font-weight="600">Partially supported</text>
+    </g>
+    <g transform="translate(286 488)">
+      <rect width="512" height="40" rx="8" fill="#101214" stroke="#2A2F34"/>
+      <circle cx="18" cy="20" r="5" fill="#F87171"/>
+      <rect x="34" y="15" width="230" height="10" rx="5" class="bar"/>
+      <text x="498" y="25" text-anchor="end" fill="#F87171" font-weight="600">Conflict</text>
+    </g>
+  </g>
+  <text x="286" y="570" class="m" font-size="12">Answered from existing research · 0 new searches</text>
+
+  <!-- case file -->
+  <rect x="846" y="156" width="330" height="440" rx="12" class="card"/>
+  <text x="870" y="190" class="h" font-size="15">Case file</text>
+  <g font-size="12">
+    <rect x="870" y="206" width="66" height="26" rx="13" fill="#4C8DF6"/>
+    <text x="903" y="223" text-anchor="middle" fill="#101214" font-weight="600">Review</text>
+    <text x="952" y="223" class="m">Claims</text>
+    <text x="1004" y="223" class="m">Conflicts</text>
+    <text x="1068" y="223" class="m">Plan</text>
+    <text x="1104" y="223" class="m">Trace</text>
+  </g>
+  <g transform="translate(870 252)">
+    <rect width="282" height="150" rx="10" fill="#101214" stroke="#2A2F34"/>
+    <text x="16" y="28" fill="#FBBF24" font-size="12" font-weight="600">Partially supported</text>
+    <rect x="16" y="42" width="240" height="9" rx="4.5" class="bar"/>
+    <rect x="16" y="58" width="200" height="9" rx="4.5" class="bar"/>
+    <rect x="16" y="78" width="4" height="30" rx="2" fill="#4C8DF6"/>
+    <rect x="28" y="82" width="220" height="8" rx="4" fill="#1E2226"/>
+    <rect x="28" y="96" width="180" height="8" rx="4" fill="#1E2226"/>
+    <rect x="16" y="118" width="74" height="22" rx="6" fill="#4ADE80" fill-opacity="0.16"/>
+    <text x="53" y="133" text-anchor="middle" fill="#4ADE80" font-size="12" font-weight="600">Accept</text>
+    <rect x="98" y="118" width="74" height="22" rx="6" fill="#F87171" fill-opacity="0.16"/>
+    <text x="135" y="133" text-anchor="middle" fill="#F87171" font-size="12" font-weight="600">Reject</text>
+  </g>
+  <text x="870" y="436" class="m" font-size="12" letter-spacing="1.5">FOLLOW-UP MODE</text>
+  <g font-size="12">
+    <rect x="870" y="450" width="282" height="30" rx="8" fill="#1E2226" stroke="#4C8DF6"/>
+    <text x="884" y="470" class="b">● Use current research</text>
+    <rect x="870" y="488" width="282" height="30" rx="8" fill="#101214" stroke="#2A2F34"/>
+    <text x="884" y="508" class="m">○ Research further (≤ 2 searches)</text>
+    <rect x="870" y="526" width="282" height="30" rx="8" fill="#101214" stroke="#2A2F34"/>
+    <text x="884" y="546" class="m">○ New research</text>
+  </g>
+
+  <!-- chat bar -->
+  <rect x="262" y="606" width="914" height="0" />
+</svg>
