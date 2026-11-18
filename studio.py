@@ -64,10 +64,11 @@ STEP_VERBS = {
     "request_save_file": "Preparing a file to save",
 }
 STATUS_COLORS = {
-    "Needs your input": "blue",
+    # Blue is reserved for the one primary action per view; in-progress states stay neutral.
+    "Needs your input": "orange",
     "Awaiting approval": "orange",
-    "Drafting plan": "blue",
-    "Researching": "blue",
+    "Drafting plan": "gray",
+    "Researching": "gray",
     "Needs approval": "orange",
     "Complete": "green",
     "Failed": "red",
@@ -522,12 +523,26 @@ def execute(query: str, steps: list[dict] | None, slot, context: str = ""):
 
 # ---------- Components ----------
 
-def render_empty_state():
-    st.title("What should I research?")
-    st.markdown("Ask any question in the box below, or start with one of these:")
-    st.pills("Starting points", list(SUGGESTIONS), key="suggestion",
-             label_visibility="collapsed", on_change=pick_suggestion)
-    st.space("medium")
+COMPOSER_PLACEHOLDER = "Ask a research question..."
+
+
+def composer(disabled: bool):
+    return st.chat_input(COMPOSER_PLACEHOLDER, key="composer", submit_mode="disable",
+                         disabled=disabled, max_chars=2000)
+
+
+def render_empty_state(disabled: bool):
+    """Welcome screen with the chat bar centered on the page. Returns a submitted prompt."""
+    st.space(96)
+    st.title("What should I research?", text_alignment="center")
+    st.caption("Ask anything, or start with one of the topics below.", text_alignment="center")
+    # Inside a container, chat_input renders inline (centered here) instead of pinned to the bottom.
+    with st.container():
+        typed = composer(disabled)
+    with st.container(horizontal=True, horizontal_alignment="center"):
+        st.pills("Starting points", list(SUGGESTIONS), key="suggestion",
+                 label_visibility="collapsed", on_change=pick_suggestion)
+    st.space("large")
     first = {
         "Ask first": "The agent asks a quick question or two if your request is ambiguous, "
                      "then proposes a short plan for you to review",
@@ -539,6 +554,7 @@ def render_empty_state():
         st.markdown(f"1. {first}\n"
                     f"2. It searches your selected sources: {', '.join(enabled_sources()) or 'none selected'}\n"
                     "3. You get a sourced report you can explore, check and save")
+    return typed
 
 
 def render_clarify_card():

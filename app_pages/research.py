@@ -4,10 +4,16 @@ import streamlit as st
 
 import studio as s
 
-# One primary view at a time: clarifying questions, plan, report, or empty state.
+sources = s.enabled_sources()
+if not sources:
+    st.warning("Turn on at least one source in the sidebar to start researching.")
+
+# One primary view at a time: clarifying questions, plan, report, or the welcome screen.
 body = st.empty()
 run_request = None  # (query, steps, context)
 clarified = None  # (query, context)
+typed = None
+on_welcome = False
 with body.container():
     if st.session_state.pending_clarify:
         clarified = s.render_clarify_card()
@@ -16,15 +22,14 @@ with body.container():
     elif st.session_state.active is not None:
         s.render_report(st.session_state.active)
     else:
-        s.render_empty_state()
+        on_welcome = True
+        typed = s.render_empty_state(disabled=not sources)  # chat bar centered on the page
 
 s.render_approval_notice()
 
-sources = s.enabled_sources()
-if not sources:
-    st.warning("Turn on at least one source in the sidebar to start researching.")
-typed = st.chat_input("Ask a research question...", key="composer", submit_mode="disable",
-                      disabled=not sources, max_chars=2000)
+# With a plan or report on screen, the chat bar is pinned to the bottom instead.
+if not on_welcome:
+    typed = s.composer(disabled=not sources)
 
 # Slow work goes last, so the page above renders instantly.
 prompt = typed or st.session_state.queued_prompt

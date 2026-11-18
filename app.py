@@ -34,7 +34,7 @@ page = st.navigation([research, library, approvals, runs], position="hidden")
 # Sidebar: only persistent navigation and controls that affect every research run.
 with st.sidebar:
     st.markdown("### Research Studio")
-    if st.button("New research", type="primary", icon=":material/add:", width="stretch"):
+    if st.button("New research", icon=":material/add:", width="stretch"):
         s.new_research()
         st.switch_page(research)
 

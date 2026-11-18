@@ -1,19 +1,33 @@
-# Light mode only: defining just [theme] (no [theme.dark]) removes the
+# Dark mode only: defining just [theme] (no [theme.light]) removes the
 # light/dark switcher from the settings menu.
+# Near-black base, subtly elevated surfaces, softened accents. No pure #000 / #fff.
 [theme]
-base = "light"
-primaryColor = "#2563eb"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f4f6fa"
-textColor = "#1f2328"
-borderColor = "#e3e7ee"
-linkColor = "#1d4ed8"
+base = "dark"
+backgroundColor = "#101214"           # page canvas
+secondaryBackgroundColor = "#171A1D"  # cards, inputs, chat bubbles
+textColor = "#E7EAED"                 # headings and body (captions are a faded tint of this)
+borderColor = "#2A2F34"               # card outlines, dividers, input borders
+primaryColor = "#4C8DF6"              # one primary action per view, selected states
+linkColor = "#4C8DF6"
 showWidgetBorder = true
 baseRadius = "medium"
 font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
 
+codeBackgroundColor = "#171A1D"
+dataframeBorderColor = "#2A2F34"
+dataframeHeaderBackgroundColor = "#1E2226"
+
+# Status colors
+greenColor = "#4ADE80"   # complete, valid citations, successful saves
+redColor = "#F87171"     # failed research, invalid sources
+orangeColor = "#FBBF24"  # pending approval, unverified claims
+yellowColor = "#FBBF24"
+blueColor = "#4C8DF6"
+grayColor = "#9AA4AE"    # secondary text tone
+
 [theme.sidebar]
-backgroundColor = "#f8fafc"
+backgroundColor = "#171A1D"
+secondaryBackgroundColor = "#1E2226"
 
 [client]
 toolbarMode = "minimal"
