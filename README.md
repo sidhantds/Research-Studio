@@ -14,8 +14,8 @@ Built with [LangChain](https://www.langchain.com/), Google Gemini and [Streamlit
   - a detailed report and a numbered source list
   - the raw tool output, collapsed by default
 - **Act on findings**: each finding has **Explore**, **Check sources** and **Ask follow-up** buttons.
-- **Approval before writing files**: the agent can only *request* to save a file. Nothing is written until you approve it on the **Approvals** page.
-- **Library**: every report from the session, plus files you've saved.
+- **Approval before saving**: the agent can only *request* to save a file. Nothing is saved until you approve it on the **Approvals** page.
+- **Library**: every report from the session, plus files you've saved. Saves are private to each visitor's session; download anything you want to keep.
 - **CLI mode**: `main.py` runs the same agent in the terminal and prints JSON.
 
 ## Getting started
@@ -106,7 +106,21 @@ Tool failures, such as a search timeout, are returned to the agent as messages i
 | Gemini model | `MODEL_NAME` in `agent.py` |
 | Search engines | `backend=` in `tools.py` |
 | Theme colors and font | `.streamlit/config.toml` |
-| Folder for saved reports | `SAVE_DIR` in `studio.py` (default `research_outputs/`) |
+
+## Deploy to Streamlit Community Cloud
+
+1. Push the repo to GitHub, then go to [share.streamlit.io](https://share.streamlit.io) and click **Create app**.
+2. Set **Main file path** to `app.py`.
+3. Under **Advanced settings**, choose Python **3.11** and add your key under **Secrets**:
+
+   ```toml
+   GOOGLE_API_KEY = "your-google-api-key"
+   ```
+
+   Streamlit Cloud also exposes top-level secrets as environment variables, so no code changes are needed.
+4. Click **Deploy**.
+
+Every visitor's research runs on your API key. To control who can use it, make the app private under **Settings → Sharing** and invite people by email.
 
 ## Troubleshooting
 

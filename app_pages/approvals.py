@@ -3,7 +3,7 @@ import streamlit as st
 import studio as s
 
 st.title("Approvals")
-st.caption("The agent asks before it writes anything to your computer.")
+st.caption("The agent asks before it saves anything.")
 
 pending = st.session_state.pending_saves
 if not pending:
@@ -24,7 +24,7 @@ for req in pending:
         with st.expander("Preview"):
             st.text(req["data"][:3000])
         st.text_input("File name", value=req["filename"], key=f"save_name_{req['id']}",
-                      help=f"Saved inside the `{s.SAVE_DIR}` folder.")
+                      help="Saved to your library for this session. Download it from there to keep it.")
         with st.container(horizontal=True, gap="small"):
             st.button("Approve", type="primary", on_click=s.approve_save, args=(req["id"],),
                       key=f"ok_{req['id']}")

@@ -6,7 +6,6 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from pathlib import Path
 from urllib.parse import urlparse
 
 import streamlit as st
@@ -22,9 +21,7 @@ from agent import (
     plan_to_instructions,
     run_research,
 )
-from tools import save_to_txt, search_tool, wiki_tool
-
-SAVE_DIR = Path("research_outputs")
+from tools import search_tool, wiki_tool
 RESEARCH_PAGE = "app_pages/research.py"
 APPROVALS_PAGE = "app_pages/approvals.py"
 
@@ -65,6 +62,9 @@ def init_state():
         "pending_plan": None,  # plan awaiting approval
         "pending_saves": [],  # file writes awaiting approval
         "queued_prompt": None,  # prompt queued by a button
+        # Saves live in this visitor's session only. On a shared server (e.g. Streamlit
+        # Cloud) a disk folder would be visible to every visitor and wiped on restart.
+        "saved_files": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -197,28 +197,38 @@ def remove_plan_step(sid: str):
     plan["steps"] = [s for s in plan["steps"] if s["sid"] != sid]
 
 
+def _store_file(name: str, data: str) -> str:
+    """Add a file to this session's library; returns the (possibly de-duplicated) name."""
+    taken = {f["name"] for f in st.session_state.saved_files}
+    stem, ext = os.path.splitext(name)
+    n = 2
+    while name in taken:
+        name = f"{stem} ({n}){ext}"
+        n += 1
+    st.session_state.saved_files.append(
+        {"name": name, "data": data, "when": datetime.now().strftime("%b %d, %H:%M")}
+    )
+    return name
+
+
 def approve_save(req_id: str):
     req = next((r for r in st.session_state.pending_saves if r["id"] == req_id), None)
     if not req:
         return
-    SAVE_DIR.mkdir(exist_ok=True)
-    name = safe_filename(st.session_state.get(f"save_name_{req_id}", req["filename"]))
-    save_to_txt(req["data"], str(SAVE_DIR / name))
+    name = _store_file(safe_filename(st.session_state.get(f"save_name_{req_id}", req["filename"])), req["data"])
     st.session_state.pending_saves.remove(req)
-    st.toast(f"Saved to {SAVE_DIR / name}", icon=":material/check_circle:")
+    st.toast(f"Saved {name} to your library", icon=":material/check_circle:")
 
 
 def skip_save(req_id: str):
     st.session_state.pending_saves = [r for r in st.session_state.pending_saves if r["id"] != req_id]
-    st.toast("Skipped. Nothing was written.")
+    st.toast("Skipped. Nothing was saved.")
 
 
 def save_report(idx: int):
     d = st.session_state.dossiers[idx]
-    SAVE_DIR.mkdir(exist_ok=True)
-    name = safe_filename(d["title"][:50].replace(" ", "_"))
-    save_to_txt(report_markdown(d["result"]), str(SAVE_DIR / name))
-    st.toast(f"Saved to {SAVE_DIR / name}", icon=":material/check_circle:")
+    name = _store_file(safe_filename(d["title"][:50].replace(" ", "_")), report_markdown(d["result"]))
+    st.toast(f"Saved {name} to your library", icon=":material/check_circle:")
 
 
 # ---------- Live progress ----------
@@ -489,15 +499,14 @@ def render_approval_notice():
 
 
 def render_saved_files():
-    files = sorted(SAVE_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True) if SAVE_DIR.exists() else []
+    files = st.session_state.saved_files
     if not files:
         st.caption("Nothing saved yet. Use **Save** on a report, or approve a save request from the agent.")
         return
-    for i, f in enumerate(files):
-        stat = f.stat()
-        when = datetime.fromtimestamp(stat.st_mtime).strftime("%b %d, %H:%M")
-        with st.expander(f"{f.name} · {stat.st_size / 1024:.1f} KB · {when}"):
-            text = f.read_text(encoding="utf-8", errors="replace")
-            st.text(text[:3000] + ("…" if len(text) > 3000 else ""))
-            st.download_button("Download", data=text, file_name=f.name, mime="text/plain",
+    st.caption("Saved files last for this session. Download anything you want to keep.")
+    for i in reversed(range(len(files))):
+        f = files[i]
+        with st.expander(f"{f['name']} · {len(f['data'].encode()) / 1024:.1f} KB · {f['when']}"):
+            st.text(f["data"][:3000] + ("…" if len(f["data"]) > 3000 else ""))
+            st.download_button("Download", data=f["data"], file_name=f["name"], mime="text/plain",
                                type="tertiary", key=f"dlfile_{i}", on_click="ignore")
